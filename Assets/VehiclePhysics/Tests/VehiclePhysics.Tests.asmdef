@@ -1,0 +1,26 @@
+{
+    "name": "VehiclePhysics.Tests",
+    "rootNamespace": "VehiclePhysics.Tests",
+    "references": [
+        "GUID:cfc5b1585652e4ffe9620e3c79bbfe13",
+        "GUID:5303e4b486f1745ca8ae5a1239d32690",
+        "GUID:2665a8d13d1b3f18800f46e256720795",
+        "GUID:e0cd26848372d4e5c891c569017e11f1",
+        "GUID:d8b63aba1907145bea998dd612889d6b",
+        "GUID:aaf6804a66b394e9b8c133f80fc0c3e3"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
