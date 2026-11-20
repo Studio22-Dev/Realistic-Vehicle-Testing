@@ -73,12 +73,16 @@ namespace VehiclePhysics.Tests
                 int start = world.Vehicles[vehIdx].WheelStartIndex;
                 for (int w = 0; w < 4; w++)
                 {
-                    WheelContact contact = world.WheelContacts[start + w];
-                    Assert.AreEqual(1, contact.HasContact);
-                    Assert.AreEqual(0f, contact.PlanePoint.y, 1e-3f);
-                    Assert.AreEqual(1f, contact.PlaneNormal.y, 1e-3f);
-                    Assert.AreEqual(0.65f, contact.StaticFriction, 1e-4f);
-                    Assert.AreEqual(1, contact.SurfaceMaterialType);
+                    ContactManifold manifold = world.ContactManifolds[start + w];
+                    SurfaceMaterialData mat = world.SurfaceMaterials[manifold.PrimaryMaterialIndex];
+
+                    Assert.AreEqual(1, manifold.IsGrounded);
+                    Assert.AreEqual(1, manifold.ClusterBottom.IsValid);
+                    Assert.AreEqual(1, manifold.ActiveClusterMask & 1);
+                    Assert.AreEqual(0f, manifold.BlendedPoint.y, 1e-3f);
+                    Assert.AreEqual(1f, manifold.BlendedNormal.y, 1e-3f);
+                    Assert.AreEqual(0.65f, mat.StaticFriction, 1e-4f);
+                    Assert.AreEqual(1, mat.MaterialTypeId);
                     Assert.AreEqual(1, world.WheelInputs[start + w].ContactSampleCount);
                 }
             }
@@ -117,10 +121,10 @@ namespace VehiclePhysics.Tests
                 int start = world.Vehicles[vehIdx].WheelStartIndex;
                 for (int w = 0; w < 4; w++)
                 {
-                    WheelContact contact = world.WheelContacts[start + w];
-                    Assert.AreEqual(1, contact.HasContact);
-                    Assert.AreEqual(0f, contact.PlanePoint.y, 1e-3f);
-                    Assert.AreEqual(1, contact.SurfaceMaterialType);
+                    ContactManifold manifold = world.ContactManifolds[start + w];
+                    Assert.AreEqual(1, manifold.IsGrounded);
+                    Assert.AreEqual(0f, manifold.BlendedPoint.y, 1e-3f);
+                    Assert.AreEqual(1, world.SurfaceMaterials[manifold.PrimaryMaterialIndex].MaterialTypeId);
                 }
             }
             finally
@@ -161,11 +165,14 @@ namespace VehiclePhysics.Tests
                 pipeline.ScheduleQueries(world, Physics.defaultPhysicsScene, ~0).Complete();
 
                 int start = world.Vehicles[vehIdx].WheelStartIndex;
-                WheelContact fl = world.WheelContacts[start + 0]; // Contact around (-0.8, 0, +1.3)
-                float3 expected = new float3(10f, 0f, 0f) + math.cross(new float3(0f, 2f, 0f), fl.PlanePoint);
-                Assert.AreEqual(expected.x, fl.SurfaceVelocity.x, 1e-3f);
-                Assert.AreEqual(expected.y, fl.SurfaceVelocity.y, 1e-3f);
-                Assert.AreEqual(expected.z, fl.SurfaceVelocity.z, 1e-3f);
+                ContactManifold fl = world.ContactManifolds[start + 0]; // Contact around (-0.8, 0, +1.3)
+                float3 expected = new float3(10f, 0f, 0f) + math.cross(new float3(0f, 2f, 0f), fl.BlendedPoint);
+
+                Assert.AreNotEqual(0, fl.Flags & ManifoldFlags.TouchesDynamicBody);
+                Assert.AreEqual(expected.x, fl.BlendedVelocity.x, 1e-3f);
+                Assert.AreEqual(expected.y, fl.BlendedVelocity.y, 1e-3f);
+                Assert.AreEqual(expected.z, fl.BlendedVelocity.z, 1e-3f);
+                Assert.AreEqual(expected.x, fl.ClusterBottom.SurfaceVelocity.x, 1e-3f);
             }
             finally
             {
@@ -190,7 +197,7 @@ namespace VehiclePhysics.Tests
                 // Grounded tick
                 pipeline.ScheduleQueries(world, Physics.defaultPhysicsScene, ~0).Complete();
                 int start = world.Vehicles[vehIdx].WheelStartIndex;
-                Assert.AreEqual(1, world.WheelContacts[start].HasContact);
+                Assert.AreEqual(1, world.ContactManifolds[start].IsGrounded);
 
                 // Teleport high into the air
                 VehicleState veh = world.Vehicles[vehIdx];
@@ -200,9 +207,41 @@ namespace VehiclePhysics.Tests
                 pipeline.ScheduleQueries(world, Physics.defaultPhysicsScene, ~0).Complete();
                 for (int w = 0; w < 4; w++)
                 {
-                    Assert.AreEqual(0, world.WheelContacts[start + w].HasContact);
+                    Assert.AreEqual(0, world.ContactManifolds[start + w].IsGrounded);
+                    Assert.AreEqual(0, world.ContactManifolds[start + w].ActiveClusterMask);
                     Assert.AreEqual(0, world.WheelInputs[start + w].ContactSampleCount);
                 }
+            }
+            finally
+            {
+                Object.DestroyImmediate(groundGo);
+            }
+        }
+
+        [Test]
+        public void RaycastBridge_DetachWheelClearsManifoldWithoutChangingVehicleCount()
+        {
+            var groundGo = new GameObject("TestGround");
+            try
+            {
+                groundGo.transform.position = new Vector3(0f, -0.5f, 0f);
+                var groundCol = groundGo.AddComponent<BoxCollider>();
+                groundCol.size = new Vector3(50f, 1f, 50f);
+                Physics.SyncTransforms();
+
+                using var world = CreateTestWorld(out int vehIdx);
+                using var pipeline = new VehicleRaycastPipeline(world.MaxTotalWheelSlots, maxHitsPerRay: 3);
+
+                pipeline.ScheduleQueries(world, Physics.defaultPhysicsScene, ~0).Complete();
+                int start = world.Vehicles[vehIdx].WheelStartIndex;
+                Assert.AreEqual(1, world.ContactManifolds[start + 2].IsGrounded);
+
+                world.SetWheelDetached(vehIdx, 2, true);
+                pipeline.ScheduleQueries(world, Physics.defaultPhysicsScene, ~0).Complete();
+
+                Assert.AreEqual(0, world.ContactManifolds[start + 2].IsGrounded);
+                Assert.AreEqual(0, world.WheelInputs[start + 2].ContactSampleCount);
+                Assert.AreEqual(1, world.ContactManifolds[start + 0].IsGrounded);
             }
             finally
             {

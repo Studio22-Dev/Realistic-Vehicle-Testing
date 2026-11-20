@@ -132,18 +132,18 @@ namespace VehiclePhysics.Tests
 
                 for (int w = 0; w < wpCount; w++)
                 {
-                    float a = (w / (float)wpCount) * math.PI * 2f;
+                    float a = w / (float)wpCount * math.PI * 2f;
                     waypoints[w] = new float3(80f * math.cos(a), 0f, 50f * math.sin(a));
                 }
 
                 for (int i = 0; i < fleetSize; i++)
                 {
                     bool isPlayer = i == 0;
-                    float a = (i / (float)fleetSize) * math.PI * 2f;
+                    float a = i / (float)fleetSize * math.PI * 2f;
                     float3 pos = new float3(80f * math.cos(a), 0.65f, 50f * math.sin(a));
                     float3 fwd = math.normalizesafe(new float3(-80f * math.sin(a), 0f, 50f * math.cos(a)));
                     world.SpawnVehicle((uint)(i + 1), 0, pos, quaternion.LookRotationSafe(fwd, math.up()), isPlayer, (ushort)(isPlayer ? 9 : 2));
-                    wpIndices[i] = ((int)math.floor((a / (math.PI * 2f)) * wpCount) + 1) % wpCount;
+                    wpIndices[i] = ((int)math.floor(a / (math.PI * 2f) * wpCount) + 1) % wpCount;
                 }
 
                 for (int tick = 0; tick < 120; tick++)
@@ -177,11 +177,19 @@ namespace VehiclePhysics.Tests
                     new VehicleSimulationJob
                     {
                         FixedDeltaTime = 1f / 60f,
-                        VehicleConfigs = world.VehicleConfigs, PowertrainConfigs = world.PowertrainConfigs,
-                        WheelConfigs = world.WheelConfigs, DriverInputs = world.DriverInputs,
-                        WheelContacts = world.WheelContacts, Vehicles = world.Vehicles,
-                        Powertrains = world.Powertrains, RenderPoses = world.RenderPoses,
-                        WheelInputs = world.WheelInputs, Wheels = world.Wheels
+                        VehicleConfigs = world.VehicleConfigs,
+                        PowertrainConfigs = world.PowertrainConfigs,
+                        WheelConfigs = world.WheelConfigs,
+                        DriverInputs = world.DriverInputs,
+                        SurfaceMaterials = world.SurfaceMaterials,
+                        Vehicles = world.Vehicles,
+                        Powertrains = world.Powertrains,
+                        RenderPoses = world.RenderPoses,
+                        WheelInputs = world.WheelInputs,
+                        Wheels = world.Wheels,
+                        ContactManifolds = world.ContactManifolds,
+                        TireCarcassStates = world.TireCarcassStates,
+                        TireThermalStates = world.TireThermalStates
                     }.Schedule(fleetSize, 1, colH).Complete();
                 }
 

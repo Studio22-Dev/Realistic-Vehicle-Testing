@@ -149,8 +149,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: VehiclePhysics.Runtime::VehiclePhysics.Runtime.VehicleSimulationManager
   totalVehicles: 24
-  playerSubsteps: 9
-  nearAiSubsteps: 2
+  playerSubsteps: 5
+  nearAiSubsteps: 3
   farAiSubsteps: 2
   nearAiRadiusM: 60
   sleepRadiusM: 350

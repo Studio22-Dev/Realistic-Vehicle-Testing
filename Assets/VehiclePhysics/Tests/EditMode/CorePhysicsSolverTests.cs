@@ -106,12 +106,15 @@ namespace VehiclePhysics.Tests
                     PowertrainConfigs = world.PowertrainConfigs,
                     WheelConfigs = world.WheelConfigs,
                     DriverInputs = world.DriverInputs,
-                    WheelContacts = world.WheelContacts,
+                    SurfaceMaterials = world.SurfaceMaterials,
                     Vehicles = world.Vehicles,
                     Powertrains = world.Powertrains,
                     RenderPoses = world.RenderPoses,
                     WheelInputs = world.WheelInputs,
-                    Wheels = world.Wheels
+                    Wheels = world.Wheels,
+                    ContactManifolds = world.ContactManifolds,
+                    TireCarcassStates = world.TireCarcassStates,
+                    TireThermalStates = world.TireThermalStates
                 };
                 simJob.Schedule(world.ActiveVehicleCount, 1, qHandle).Complete();
             }

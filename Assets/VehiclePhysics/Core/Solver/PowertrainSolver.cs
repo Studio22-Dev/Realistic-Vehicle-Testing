@@ -46,7 +46,8 @@ namespace VehiclePhysics.Core
             ref PowertrainState pt,
             NativeArray<WheelConfig> wheelConfigs,
             NativeArray<WheelInput> wheelInputs,
-            NativeArray<WheelContact> wheelContacts,
+            NativeArray<ContactManifold> contactManifolds,
+            NativeArray<SurfaceMaterialData> surfaceMaterials,
             NativeArray<WheelState> wheels,
             in FixedStepTireCache tireCache,
             float dtSub)
@@ -77,7 +78,6 @@ namespace VehiclePhysics.Core
             float effectiveRatio = gearRatio * ptCfg.FinalDriveRatio;
             pt.EffectiveGearRatio = effectiveRatio;
 
-            // Compute attached driven share normalization so sum(s_attached) == 1
             var driveShare = new FixedFloat16();
             float attachedShareSum = 0f;
             for (int w = 0; w < wheelCount; w++)
@@ -96,15 +96,12 @@ namespace VehiclePhysics.Core
                     driveShare.Set(w, driveShare.Get(w) * invShareSum);
             }
 
-            // Evaluate current wheel carrier speed (weighted sum of attached driven wheels)
             float omegaCarrier = 0f;
             for (int w = 0; w < wheelCount; w++)
-            {
                 omegaCarrier += driveShare.Get(w) * wheels[start + w].AngularVelocity;
-            }
             float kinematicGearboxOmega = effectiveRatio * omegaCarrier;
 
-            // Traction Control (TCS) throttle reduction if attached driven wheels overspin
+            // Traction Control (TCS)
             float tcsScale = 1.0f;
             bool tcsAllowed = (driver.InputFlags & (1 << 1)) == 0;
             if (tcsAllowed && rawThrottle > 0.05f)
@@ -180,7 +177,6 @@ namespace VehiclePhysics.Core
             float throttleRate = 1.0f - math.exp(-35.0f * dtSub);
             pt.ThrottleFiltered = math.lerp(pt.ThrottleFiltered, targetThrottle, throttleRate);
 
-            // Compute Clutch Engagement [0..1]
             float manualEngage = 1.0f - math.saturate(driver.ClutchPedal);
             float clutchEngage;
             if (pt.CurrentGear == 0)
@@ -217,26 +213,25 @@ namespace VehiclePhysics.Core
             pt.ClutchEngagement = clutchEngage;
 
             // -----------------------------------------------------------------
-            // 2. Implicit Wheel Stabilization & Free-Velocity Predictions
+            // 2. Gather Wheel Inertias, Road Impulses & Brake Limits
             // -----------------------------------------------------------------
             var iEff = new FixedFloat16();
             var invIEff = new FixedFloat16();
-            var omegaStar = new FixedFloat16();
-            var omegaWork = new FixedFloat16();
+            var wsInitOmega = new FixedFloat16();
+            var jRoad = new FixedFloat16();
+            var jExtRoadRr = new FixedFloat16();
+            var jRrMaxArr = new FixedFloat16();
             var jBrkMax = new FixedFloat16();
             var jBrkAccum = new FixedFloat16();
 
             bool absAllowed = (driver.InputFlags & (1 << 0)) == 0;
             float invDt = 1.0f / math.max(dtSub, 1e-6f);
 
-            float prevMeshDragTorque = (effectiveRatio != 0f && clutchEngage > 0.01f && attachedShareSum > 1e-5f)
-                ? (ptCfg.DrivelineBaseDragNm + (1.0f - math.saturate(ptCfg.DrivelineEfficiency)) * math.abs(pt.ClutchTorqueNm))
-                : 0f;
-
             for (int w = 0; w < wheelCount; w++)
             {
                 int slot = start + w;
                 WheelState ws = wheels[slot];
+                wsInitOmega.Set(w, ws.AngularVelocity);
 
                 if ((ws.WheelFlags & WheelFlagBits.IsDetached) != 0)
                 {
@@ -249,34 +244,34 @@ namespace VehiclePhysics.Core
 
                     iEff.Set(w, 1f);
                     invIEff.Set(w, 0f);
-                    omegaStar.Set(w, 0f);
-                    omegaWork.Set(w, 0f);
+                    jRoad.Set(w, 0f);
+                    jRrMaxArr.Set(w, 0f);
                     jBrkMax.Set(w, 0f);
                     continue;
                 }
 
                 WheelConfig wCfg = wheelConfigs[cfgStart + w];
                 WheelInput wIn = wheelInputs[slot];
-                WheelContact contact = wheelContacts[slot];
+                ContactManifold manifold = contactManifolds[slot];
 
-                bool grounded = (ws.WheelFlags & WheelFlagBits.IsGrounded) != 0;
+                bool grounded = (ws.WheelFlags & WheelFlagBits.IsGrounded) != 0 && manifold.IsGrounded != 0;
                 TireStepResult tr = tireCache.Get(w);
 
                 float inertiaW = math.max(wCfg.WheelInertiaKgM2, 0.2f)
                                + (grounded ? dtSub * ws.EffectiveRollingRadius * tr.dFx_dOmega : 0f);
                 float invIW = 1.0f / inertiaW;
 
-                float roadTorque = grounded ? (-tr.Fx * ws.EffectiveRollingRadius) : 0f;
-                float share = driveShare.Get(w);
+                float jRoadW = grounded ? (-tr.Fx * ws.EffectiveRollingRadius * dtSub) : 0f;
 
-                float meshDrag = (share > 0f && prevMeshDragTorque > 0f)
-                    ? -math.sign(ws.AngularVelocity) * prevMeshDragTorque * math.abs(effectiveRatio) * share
-                    : 0f;
+                float jRrMax = 0f;
+                if (grounded)
+                {
+                    int matIdx = math.clamp(manifold.PrimaryMaterialIndex, 0, surfaceMaterials.Length - 1);
+                    float rrCoeff = surfaceMaterials[matIdx].RollingResistance;
+                    jRrMax = math.max(0f, rrCoeff * ws.GroundLoadN * ws.EffectiveRollingRadius) * dtSub;
+                }
 
-                float wFree = ws.AngularVelocity + (roadTorque + meshDrag) * invIW * dtSub;
-                if (meshDrag != 0f && ws.AngularVelocity * wFree < 0f && math.abs(roadTorque) < math.abs(meshDrag))
-                    wFree = 0f;
-
+                // ABS modulation
                 float serviceBrk = wIn.ServiceBrakeTorqueNm;
                 if (absAllowed && (wIn.ControlFlags & WheelControlFlagBits.AllowAbs) != 0 &&
                     grounded && serviceBrk > 1f && math.abs(veh.ForwardSpeedMs) > 2.5f)
@@ -298,16 +293,13 @@ namespace VehiclePhysics.Core
                     ws.WheelFlags = (byte)(ws.WheelFlags & ~WheelFlagBits.AbsActive);
                 }
 
-                float rollingTorque = grounded
-                    ? contact.RollingResistance * ws.GroundLoadN * ws.EffectiveRollingRadius
-                    : 0f;
-                float maxResistTorque = serviceBrk + wIn.HandbrakeTorqueNm + rollingTorque;
+                float maxBrakeTorque = math.max(0f, serviceBrk + wIn.HandbrakeTorqueNm);
 
                 iEff.Set(w, inertiaW);
                 invIEff.Set(w, invIW);
-                omegaStar.Set(w, wFree);
-                omegaWork.Set(w, wFree);
-                jBrkMax.Set(w, maxResistTorque * dtSub);
+                jRoad.Set(w, jRoadW);
+                jRrMaxArr.Set(w, jRrMax);
+                jBrkMax.Set(w, maxBrakeTorque * dtSub);
 
                 wheels[slot] = ws;
             }
@@ -323,14 +315,17 @@ namespace VehiclePhysics.Core
             float omegaE = math.max(0f, pt.EngineOmega + netEngineTorque * invIe * dtSub);
 
             // -----------------------------------------------------------------
-            // 3. Closed-Form Reflected Driveline Inertia & Warm-Started PGS
+            // 3. Coupled [Wheels + Gearbox] Sherman-Morrison Inverse Mass M^-1
             // -----------------------------------------------------------------
-            bool clutchActive = (effectiveRatio != 0f) && (clutchEngage > 0.001f) && (attachedShareSum > 1e-5f);
+            bool gearEngaged = (effectiveRatio != 0f) && (attachedShareSum > 1e-5f);
+            bool clutchActive = gearEngaged && (clutchEngage > 0.001f);
+
             float cInv = 0f;
             float betaGbx = 1.0f;
+            float alphaSm = 0f; // iGbx * effectiveRatio^2 * betaGbx
             float invIDrive = 0f;
 
-            if (clutchActive)
+            if (gearEngaged)
             {
                 for (int w = 0; w < wheelCount; w++)
                 {
@@ -341,7 +336,45 @@ namespace VehiclePhysics.Core
                 }
                 float iGbx = math.max(ptCfg.GearboxInertia, 0f);
                 betaGbx = 1.0f / (1.0f + iGbx * cInv);
+                alphaSm = iGbx * effectiveRatio * effectiveRatio * betaGbx;
                 invIDrive = cInv * betaGbx;
+            }
+
+            var qVec = new FixedFloat16();
+            var invMDiag = new FixedFloat16();
+            for (int w = 0; w < wheelCount; w++)
+            {
+                float invW = invIEff.Get(w);
+                float q = gearEngaged ? (invW * driveShare.Get(w)) : 0f;
+                qVec.Set(w, q);
+                invMDiag.Set(w, invW > 0f ? math.max(invW - alphaSm * q * q, 1e-9f) : 0f);
+            }
+
+            // Apply Road Torque via exact M^-1 so gearbox inertia couples symmetrically to road & clutch
+            var omegaWork = new FixedFloat16();
+            float qDotRoad = 0f;
+            for (int w = 0; w < wheelCount; w++)
+                qDotRoad += qVec.Get(w) * jRoad.Get(w);
+
+            for (int w = 0; w < wheelCount; w++)
+            {
+                float invW = invIEff.Get(w);
+                float wAfter = wsInitOmega.Get(w) + jRoad.Get(w) * invW - alphaSm * qDotRoad * qVec.Get(w);
+                omegaWork.Set(w, wAfter);
+            }
+
+            // Audit Fix #4: Passive zero-clamped rolling resistance via exact M^-1
+            for (int w = 0; w < wheelCount; w++)
+            {
+                float dJRr = 0f;
+                float jRrMax = jRrMaxArr.Get(w);
+                if (jRrMax > 0f && invMDiag.Get(w) > 0f)
+                {
+                    dJRr = math.clamp(-omegaWork.Get(w) / invMDiag.Get(w), -jRrMax, jRrMax);
+                    ApplyWheelImpulseExact(
+                        w, dJRr, wheelCount, alphaSm, in invIEff, in qVec, ref omegaWork);
+                }
+                jExtRoadRr.Set(w, jRoad.Get(w) + dJRr);
             }
 
             float hysteresis = pt.ClutchLockState == ClutchLockStates.Locked
@@ -351,26 +384,72 @@ namespace VehiclePhysics.Core
                 ? clutchEngage * hysteresis * ptCfg.ClutchMaxTorqueNm * dtSub
                 : 0f;
 
+            // Audit Fix #2: Keep PGS kinematic clutch-to-wheel transfer exact (eta_d = 1.0),
+            // and apply (1 - eta_d) + axle churning as an explicit passive carrier drag via M^-1.
+            float absG = math.abs(effectiveRatio);
+            float effEta = ptCfg.DrivelineEfficiency > 0f
+                ? math.clamp(ptCfg.DrivelineEfficiency, 0.5f, 1.0f)
+                : 1.0f;
+            float baseDragAtWheelsNm = attachedShareSum > 1e-5f
+                ? math.max(0f, ptCfg.DrivelineBaseDragNm) * math.max(1.0f, math.abs(ptCfg.FinalDriveRatio))
+                : 0f;
+
+            float carrierAfterRoad = 0f;
+            for (int w = 0; w < wheelCount; w++)
+                carrierAfterRoad += driveShare.Get(w) * omegaWork.Get(w);
+
+            float jMeshLossTotal = 0f;
+            if (clutchActive && jClutchMax > 0f)
+            {
+                float jClutchEst = math.clamp(
+                    (omegaE - effectiveRatio * carrierAfterRoad) / (invIe + invIDrive),
+                    -jClutchMax,
+                    jClutchMax);
+                jMeshLossTotal = (1.0f - effEta) * math.abs(jClutchEst) * absG;
+            }
+
+            float jTotalDrivelineLoss = jMeshLossTotal + baseDragAtWheelsNm * dtSub;
+            if (gearEngaged && invIDrive > 1e-9f && jTotalDrivelineLoss > 0f)
+            {
+                float iCarrierEff = (effectiveRatio * effectiveRatio) / invIDrive;
+                float dJCarrierLoss = math.clamp(
+                    -iCarrierEff * carrierAfterRoad,
+                    -jTotalDrivelineLoss,
+                    jTotalDrivelineLoss);
+
+                if (math.abs(dJCarrierLoss) > 1e-9f)
+                {
+                    for (int w = 0; w < wheelCount; w++)
+                    {
+                        float q = qVec.Get(w);
+                        if (q <= 0f) continue;
+                        omegaWork.Set(w, omegaWork.Get(w) + betaGbx * dJCarrierLoss * q);
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 4. Warm-Started PGS Solver (Audit Fix #1: Accumulated Clamps)
+            // -----------------------------------------------------------------
             float jClutchAccum = 0f;
             if (clutchActive && jClutchMax > 0f)
             {
                 jClutchAccum = math.clamp(pt.WarmStartClutchImpulse, -jClutchMax, jClutchMax);
                 ApplyClutchImpulse(
                     jClutchAccum, effectiveRatio, invIe, betaGbx, wheelCount,
-                    in driveShare, in invIEff, ref omegaE, ref omegaWork);
+                    in qVec, ref omegaE, ref omegaWork);
             }
 
             for (int w = 0; w < wheelCount; w++)
             {
-                if (invIEff.Get(w) <= 0f) continue;
+                if (invMDiag.Get(w) <= 0f) continue;
                 float bMax = jBrkMax.Get(w);
                 float jWarm = math.clamp(wheels[start + w].WarmStartBrakeImpulse, -bMax, bMax);
                 jBrkAccum.Set(w, jWarm);
-                omegaWork.Set(w, omegaWork.Get(w) + jWarm * invIEff.Get(w));
+                ApplyWheelImpulseExact(w, jWarm, wheelCount, alphaSm, in invIEff, in qVec, ref omegaWork);
             }
 
-            float jFrontLsdAccum = 0f;
-            float jRearLsdAccum = 0f;
+            float4 jLsdAccum = float4.zero;
 
             const int pgsIterations = 2;
             for (int iter = 0; iter < pgsIterations; iter++)
@@ -390,35 +469,34 @@ namespace VehiclePhysics.Core
 
                     ApplyClutchImpulse(
                         dJ, effectiveRatio, invIe, betaGbx, wheelCount,
-                        in driveShare, in invIEff, ref omegaE, ref omegaWork);
+                        in qVec, ref omegaE, ref omegaWork);
                 }
 
                 float clutchTorqueEst = math.abs(jClutchAccum) * invDt;
                 SolveAxleLsdConstraints(
                     in veh, in vCfg, in ptCfg, wheelConfigs, wheels, clutchTorqueEst, dtSub,
-                    in driveShare, in invIEff, ref omegaWork,
-                    ref jFrontLsdAccum, ref jRearLsdAccum);
+                    alphaSm, in driveShare, in invIEff, in qVec, ref omegaWork, ref jLsdAccum);
 
                 for (int w = 0; w < wheelCount; w++)
                 {
-                    if (invIEff.Get(w) <= 0f) continue;
+                    float invMd = invMDiag.Get(w);
+                    if (invMd <= 0f) continue;
                     float bMax = jBrkMax.Get(w);
                     if (bMax <= 0f) continue;
 
-                    float wCurr = omegaWork.Get(w);
-                    float dJStop = -iEff.Get(w) * wCurr;
+                    float dJStop = -omegaWork.Get(w) / invMd;
 
                     float jOld = jBrkAccum.Get(w);
                     float jNew = math.clamp(jOld + dJStop, -bMax, bMax);
                     float dJ = jNew - jOld;
 
                     jBrkAccum.Set(w, jNew);
-                    omegaWork.Set(w, wCurr + dJ * invIEff.Get(w));
+                    ApplyWheelImpulseExact(w, dJ, wheelCount, alphaSm, in invIEff, in qVec, ref omegaWork);
                 }
             }
 
             // -----------------------------------------------------------------
-            // 4. Write Final Powertrain & Wheel Velocities / Telemetry
+            // 5. Write Final Powertrain & Wheel Velocities / Telemetry
             // -----------------------------------------------------------------
             omegaE = math.max(0f, omegaE);
             if (!stalled && !autoClutchEnabled && clutchEngage > 0.5f && omegaE < ptCfg.IdleOmega * 0.25f)
@@ -445,8 +523,8 @@ namespace VehiclePhysics.Core
             pt.ClutchSlipOmega = omegaE - pt.GearboxInputOmega;
             pt.ClutchTorqueNm = jClutchAccum * invDt;
             pt.WarmStartClutchImpulse = jClutchAccum;
-            pt.WarmStartFrontLsdImpulse = jFrontLsdAccum;
-            pt.WarmStartRearLsdImpulse = jRearLsdAccum;
+            pt.WarmStartFrontLsdImpulse = jLsdAccum.x;
+            pt.WarmStartRearLsdImpulse = jLsdAccum.y;
 
             if (!clutchActive)
                 pt.ClutchLockState = ClutchLockStates.Open;
@@ -466,10 +544,10 @@ namespace VehiclePhysics.Core
 
                 float wFinal = omegaWork.Get(w);
                 float jBrk = jBrkAccum.Get(w);
-                float jDriveTotal = (wFinal - omegaStar.Get(w)) * iEff.Get(w) - jBrk;
+                float jAxleDrive = (wFinal - wsInitOmega.Get(w)) * iEff.Get(w) - jExtRoadRr.Get(w) - jBrk;
 
                 ws.AngularVelocity = wFinal;
-                ws.NetDriveTorqueNm = jDriveTotal * invDt;
+                ws.NetDriveTorqueNm = jAxleDrive * invDt;
                 ws.BrakeTorqueAppliedNm = math.abs(jBrk) * invDt;
                 ws.WarmStartBrakeImpulse = jBrk;
 
@@ -485,29 +563,52 @@ namespace VehiclePhysics.Core
             }
         }
 
+        private static void ApplyWheelImpulseExact(
+            int wheelIdx,
+            float impulse,
+            int wheelCount,
+            float alphaSm,
+            in FixedFloat16 invIEff,
+            in FixedFloat16 qVec,
+            ref FixedFloat16 omegaWork)
+        {
+            if (math.abs(impulse) < 1e-11f) return;
+
+            omegaWork.Set(wheelIdx, omegaWork.Get(wheelIdx) + impulse * invIEff.Get(wheelIdx));
+            if (alphaSm <= 0f) return;
+
+            float qw = qVec.Get(wheelIdx);
+            if (qw <= 0f) return;
+
+            float scale = alphaSm * qw * impulse;
+            for (int k = 0; k < wheelCount; k++)
+            {
+                float qk = qVec.Get(k);
+                if (qk > 0f)
+                    omegaWork.Set(k, omegaWork.Get(k) - scale * qk);
+            }
+        }
+
         private static void ApplyClutchImpulse(
             float impulse,
             float effectiveRatio,
             float invIe,
             float betaGbx,
             int wheelCount,
-            in FixedFloat16 driveShare,
-            in FixedFloat16 invIEff,
+            in FixedFloat16 qVec,
             ref float omegaE,
             ref FixedFloat16 omegaWork)
         {
             if (math.abs(impulse) < 1e-9f) return;
 
             omegaE -= impulse * invIe;
-            float jDiffIn = impulse * betaGbx;
-            float gJ = effectiveRatio * jDiffIn;
+            float gJ = effectiveRatio * (impulse * betaGbx);
 
             for (int w = 0; w < wheelCount; w++)
             {
-                float s = driveShare.Get(w);
-                float invW = invIEff.Get(w);
-                if (s <= 0f || invW <= 0f) continue;
-                omegaWork.Set(w, omegaWork.Get(w) + s * gJ * invW);
+                float q = qVec.Get(w);
+                if (q > 0f)
+                    omegaWork.Set(w, omegaWork.Get(w) + gJ * q);
             }
         }
 
@@ -519,11 +620,12 @@ namespace VehiclePhysics.Core
             NativeArray<WheelState> wheels,
             float clutchTorqueEst,
             float dtSub,
+            float alphaSm,
             in FixedFloat16 driveShare,
             in FixedFloat16 invIEff,
+            in FixedFloat16 qVec,
             ref FixedFloat16 omegaWork,
-            ref float jFrontLsdAccum,
-            ref float jRearLsdAccum)
+            ref float4 jLsdAccum)
         {
             int wheelCount = math.min(veh.WheelCount, 16);
             int start = veh.WheelStartIndex;
@@ -563,24 +665,29 @@ namespace VehiclePhysics.Core
                 float jLsdMax = lsdMaxTorque * dtSub;
                 if (jLsdMax <= 1e-6f) continue;
 
-                float invSum = invIEff.Get(leftIdx) + invIEff.Get(rightIdx);
+                float qDiff = qVec.Get(leftIdx) - qVec.Get(rightIdx);
+                float invSum = invIEff.Get(leftIdx) + invIEff.Get(rightIdx) - alphaSm * qDiff * qDiff;
                 float dJLock = slipDiff / math.max(invSum, 1e-6f);
 
-                if (axle == 0)
+                float jOld = jLsdAccum[axle];
+                float jNew = math.clamp(jOld + dJLock, -jLsdMax, jLsdMax);
+                float dJ = jNew - jOld;
+                jLsdAccum[axle] = jNew;
+
+                if (math.abs(dJ) > 1e-11f)
                 {
-                    float jOld = jFrontLsdAccum;
-                    jFrontLsdAccum = math.clamp(jOld + dJLock, -jLsdMax, jLsdMax);
-                    float dJ = jFrontLsdAccum - jOld;
                     omegaWork.Set(leftIdx, wL - dJ * invIEff.Get(leftIdx));
                     omegaWork.Set(rightIdx, wR + dJ * invIEff.Get(rightIdx));
-                }
-                else
-                {
-                    float jOld = jRearLsdAccum;
-                    jRearLsdAccum = math.clamp(jOld + dJLock, -jLsdMax, jLsdMax);
-                    float dJ = jRearLsdAccum - jOld;
-                    omegaWork.Set(leftIdx, wL - dJ * invIEff.Get(leftIdx));
-                    omegaWork.Set(rightIdx, wR + dJ * invIEff.Get(rightIdx));
+                    if (alphaSm > 0f && math.abs(qDiff) > 1e-9f)
+                    {
+                        float scale = alphaSm * qDiff * dJ;
+                        for (int k = 0; k < wheelCount; k++)
+                        {
+                            float qk = qVec.Get(k);
+                            if (qk > 0f)
+                                omegaWork.Set(k, omegaWork.Get(k) + scale * qk);
+                        }
+                    }
                 }
 
                 // Rigidly bolt any dual/inner tires sharing the same axle and side
@@ -596,9 +703,21 @@ namespace VehiclePhysics.Core
                     int primary = wCfg.SideIndex == 0 ? leftIdx : rightIdx;
                     float wP = omegaWork.Get(primary);
                     float wSec = omegaWork.Get(w);
-                    float jBolt = (wP - wSec) / math.max(invIEff.Get(primary) + invIEff.Get(w), 1e-6f);
+                    float qPair = qVec.Get(primary) - qVec.Get(w);
+                    float invBolt = invIEff.Get(primary) + invIEff.Get(w) - alphaSm * qPair * qPair;
+                    float jBolt = (wP - wSec) / math.max(invBolt, 1e-6f);
                     omegaWork.Set(primary, wP - jBolt * invIEff.Get(primary));
                     omegaWork.Set(w, wSec + jBolt * invIEff.Get(w));
+                    if (alphaSm > 0f && math.abs(qPair) > 1e-9f)
+                    {
+                        float scale = alphaSm * qPair * jBolt;
+                        for (int k = 0; k < wheelCount; k++)
+                        {
+                            float qk = qVec.Get(k);
+                            if (qk > 0f)
+                                omegaWork.Set(k, omegaWork.Get(k) + scale * qk);
+                        }
+                    }
                 }
             }
         }

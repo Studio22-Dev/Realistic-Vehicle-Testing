@@ -192,6 +192,7 @@ namespace VehiclePhysics.Runtime
                     MountPositionLocal = new float3(x, 0f, z),
                     StrutAxisLocal = new float3(0f, -1f, 0f),
                     UnloadedRadiusM = 0.33f,
+                    RimRadiusM = 0.215f,
                     RestLengthM = 0.40f,
                     MaxTravelM = 0.28f,
                     SpringStiffnessNPerM = 35000f,
@@ -200,6 +201,7 @@ namespace VehiclePhysics.Runtime
                     BumpStopStiffnessNPerM = 180000f,
                     WheelInertiaKgM2 = 1.1f,
                     RadialTireStiffnessNPerM = 220000f,
+                    RadialStiffnessNPerM = 220000f,
                     MaxRadialSquishM = 0.05f,
                     RelaxationLengthX = 0.25f,
                     RelaxationLengthY = 0.40f,
@@ -210,6 +212,9 @@ namespace VehiclePhysics.Runtime
                     TirePeakMuScale = 1.0f,
                     TireSlideMuScale = 1.0f,
                     LowSpeedDampMaxForceScale = 1.5f,
+                    NominalPressureKPa = 220f,
+                    InitialTreadDepthMm = 8.0f,
+                    CompoundType = TireCompoundType.Street,
                     AxleIndex = axle,
                     SideIndex = side,
                     DefaultControlFlags = flags
@@ -415,12 +420,15 @@ namespace VehiclePhysics.Runtime
                         PowertrainConfigs = _world.PowertrainConfigs,
                         WheelConfigs = _world.WheelConfigs,
                         DriverInputs = _world.DriverInputs,
-                        WheelContacts = _world.WheelContacts,
+                        SurfaceMaterials = _world.SurfaceMaterials,
                         Vehicles = _world.Vehicles,
                         Powertrains = _world.Powertrains,
                         RenderPoses = _world.RenderPoses,
                         WheelInputs = _world.WheelInputs,
-                        Wheels = _world.Wheels
+                        Wheels = _world.Wheels,
+                        ContactManifolds = _world.ContactManifolds,
+                        TireCarcassStates = _world.TireCarcassStates,
+                        TireThermalStates = _world.TireThermalStates
                     };
                     _pendingSimHandle = simJob.Schedule(activeCount, 1, _pendingSimHandle);
                 }
@@ -508,7 +516,7 @@ namespace VehiclePhysics.Runtime
             float rpm = pt.EngineOmega * 9.5492966f;
             string gear = pt.CurrentGear switch { -1 => "R", 0 => "N", _ => pt.CurrentGear.ToString() };
 
-            GUI.Box(new Rect(14, 14, 380, 145), "Multi-Vehicle Fleet Simulation (Phase 1)");
+            GUI.Box(new Rect(14, 14, 380, 145), "Multi-Vehicle Fleet Simulation (Phase 2 Step 1)");
             GUI.Label(new Rect(24, 38, 360, 22), $"Vehicles: {_world.ActiveVehicleCount} | Total Substeps/Tick: {totalSubsteps}");
             GUI.Label(new Rect(24, 58, 360, 22), $"Physics Step (Ray+Col+Solve): {_lastSimMs:F3} ms / 16.67 ms");
             GUI.Label(new Rect(24, 78, 360, 22), $"Burst Transform Sync: {_lastSyncMs:F3} ms");

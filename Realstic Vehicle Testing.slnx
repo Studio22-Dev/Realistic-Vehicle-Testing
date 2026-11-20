@@ -1,6 +1,6 @@
 ﻿<Solution>
-  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="VehiclePhysics.Core.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="VehiclePhysics.Bridge.csproj" />
   <Project Path="VehiclePhysics.Tests.csproj" />
   <Project Path="VehiclePhysics.Runtime.csproj" />

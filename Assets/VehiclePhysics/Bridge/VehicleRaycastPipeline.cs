@@ -12,7 +12,7 @@ namespace VehiclePhysics.Bridge
     {
         public readonly int MaxWheelCommands;
         public readonly int MaxHitsPerRay;
-        
+
         private int _mappedVehicleCount = -1;
         private bool _wheelMapDirty = true;
 
@@ -95,10 +95,10 @@ namespace VehiclePhysics.Bridge
                 {
                     int slot = veh.WheelStartIndex + w;
 
-                    // Omit detached wheels from raycasts and ensure stale contact data is cleared
+                    // Omit detached wheels from raycasts and ensure stale manifold data is cleared
                     if ((world.Wheels[slot].WheelFlags & WheelFlagBits.IsDetached) != 0)
                     {
-                        world.WheelContacts[slot] = default;
+                        world.ContactManifolds[slot] = default;
                         WheelInput wIn = world.WheelInputs[slot];
                         wIn.ContactSampleCount = 0;
                         world.WheelInputs[slot] = wIn;
@@ -117,6 +117,8 @@ namespace VehiclePhysics.Bridge
 
             ActiveCommandCount = cmdCursor;
             _lastTopologyVersion = world.TopologyVersion;
+            _mappedVehicleCount = vehCount;
+            _wheelMapDirty = false;
             _topologyDirty = false;
         }
 
@@ -127,17 +129,15 @@ namespace VehiclePhysics.Bridge
             JobHandle dependsOn = default,
             float lookaheadMarginM = 0.02f)
         {
-            if (_wheelMapDirty || _mappedVehicleCount != world.ActiveVehicleCount)
+            if (_wheelMapDirty
+                || _topologyDirty
+                || _mappedVehicleCount != world.ActiveVehicleCount
+                || _lastTopologyVersion != world.TopologyVersion)
             {
-                dependsOn.Complete(); // Only syncs on Frame 1 or when vehicles spawn/despawn
+                dependsOn.Complete();
                 RebuildActiveWheelMap(world);
-                _mappedVehicleCount = world.ActiveVehicleCount;
-                _wheelMapDirty = false;
                 dependsOn = default;
             }
-
-            if (_topologyDirty || _lastTopologyVersion != world.TopologyVersion)
-                RebuildActiveWheelMap(world);
 
             if (ActiveCommandCount == 0)
                 return dependsOn;
@@ -188,7 +188,7 @@ namespace VehiclePhysics.Bridge
                 MaxHitsPerRay = MaxHitsPerRay,
                 DefaultPatchLengthM = 0.18f,
                 ContactSamples = world.ContactSamples,
-                WheelContacts = world.WheelContacts,
+                ContactManifolds = world.ContactManifolds,
                 WheelInputs = world.WheelInputs
             };
 

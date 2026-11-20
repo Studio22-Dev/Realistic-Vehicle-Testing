@@ -31,12 +31,15 @@ namespace VehiclePhysics.Tests
             Assert.AreEqual(80, UnsafeUtility.SizeOf<WheelState>());
             Assert.AreEqual(32, UnsafeUtility.SizeOf<WheelInput>());
             Assert.AreEqual(64, UnsafeUtility.SizeOf<WheelContactSample>());
-            Assert.AreEqual(64, UnsafeUtility.SizeOf<WheelContact>());
+            Assert.AreEqual(80, UnsafeUtility.SizeOf<ManifoldContactPoint>());
+            Assert.AreEqual(384, UnsafeUtility.SizeOf<ContactManifold>());
+            Assert.AreEqual(128, UnsafeUtility.SizeOf<TireCarcassState>());
+            Assert.AreEqual(128, UnsafeUtility.SizeOf<TireThermalAndWearState>());
             Assert.AreEqual(32, UnsafeUtility.SizeOf<VehicleDriverInput>());
             Assert.AreEqual(64, UnsafeUtility.SizeOf<VehicleRenderPose>());
             Assert.AreEqual(112, UnsafeUtility.SizeOf<VehicleConfig>());
             Assert.AreEqual(208, UnsafeUtility.SizeOf<PowertrainConfig>());
-            Assert.AreEqual(112, UnsafeUtility.SizeOf<WheelConfig>());
+            Assert.AreEqual(144, UnsafeUtility.SizeOf<WheelConfig>());
             Assert.AreEqual(32, UnsafeUtility.SizeOf<SurfaceMaterialData>());
         }
 
@@ -48,7 +51,10 @@ namespace VehiclePhysics.Tests
             Assert.IsTrue(UnsafeUtility.IsBlittable<WheelState>());
             Assert.IsTrue(UnsafeUtility.IsBlittable<WheelInput>());
             Assert.IsTrue(UnsafeUtility.IsBlittable<WheelContactSample>());
-            Assert.IsTrue(UnsafeUtility.IsBlittable<WheelContact>());
+            Assert.IsTrue(UnsafeUtility.IsBlittable<ManifoldContactPoint>());
+            Assert.IsTrue(UnsafeUtility.IsBlittable<ContactManifold>());
+            Assert.IsTrue(UnsafeUtility.IsBlittable<TireCarcassState>());
+            Assert.IsTrue(UnsafeUtility.IsBlittable<TireThermalAndWearState>());
             Assert.IsTrue(UnsafeUtility.IsBlittable<VehicleDriverInput>());
             Assert.IsTrue(UnsafeUtility.IsBlittable<VehicleRenderPose>());
             Assert.IsTrue(UnsafeUtility.IsBlittable<VehicleConfig>());
@@ -70,9 +76,34 @@ namespace VehiclePhysics.Tests
             AssertAligned16<VehicleState>(nameof(VehicleState.LocalAcceleration));
 
             AssertAligned16<WheelState>(nameof(WheelState.LastWorldForce));
-            AssertAligned16<WheelContact>(nameof(WheelContact.PlanePoint));
-            AssertAligned16<WheelContact>(nameof(WheelContact.PlaneNormal));
-            AssertAligned16<WheelContact>(nameof(WheelContact.SurfaceVelocity));
+            AssertAligned16<WheelConfig>(nameof(WheelConfig.MountPositionLocal));
+            AssertAligned16<WheelConfig>(nameof(WheelConfig.StrutAxisLocal));
+
+            AssertAligned16<ManifoldContactPoint>(nameof(ManifoldContactPoint.WorldPoint));
+            AssertAligned16<ManifoldContactPoint>(nameof(ManifoldContactPoint.WorldNormal));
+            AssertAligned16<ManifoldContactPoint>(nameof(ManifoldContactPoint.SurfaceVelocity));
+            AssertAligned16<ManifoldContactPoint>(nameof(ManifoldContactPoint.PendingObjectImpulse));
+
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.ClusterBottom));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.ClusterLeading));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.ClusterTrailing));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.ClusterSidewall));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.BlendedPoint));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.BlendedNormal));
+            AssertAligned16<ContactManifold>(nameof(ContactManifold.BlendedVelocity));
+
+            AssertAligned16<TireCarcassState>(nameof(TireCarcassState.CarcassDeflectionLocal));
+            AssertAligned16<TireCarcassState>(nameof(TireCarcassState.CarcassVelocityLocal));
+            AssertAligned16<TireCarcassState>(nameof(TireCarcassState.RimLocalImpactOffset));
+
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.TreadSurfaceTempC));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.TreadSubsurfaceTempC));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.RemainingTreadDepthMm));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.FlatSpotDepthBins0));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.FlatSpotDepthBins1));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.FlatSpotDepthBins2));
+            AssertAligned16<TireThermalAndWearState>(nameof(TireThermalAndWearState.FlatSpotDepthBins3));
+
             AssertAligned16<VehicleRenderPose>(nameof(VehicleRenderPose.PreviousRotation));
             AssertAligned16<VehicleRenderPose>(nameof(VehicleRenderPose.CurrentRotation));
         }
@@ -128,11 +159,20 @@ namespace VehiclePhysics.Tests
             Assert.AreEqual(8, world.Vehicles[trlIdx].WheelCount);
             Assert.AreEqual(24, world.ActiveWheelSlotCursor);
 
-            // Verify every vehicle's wheel block starts on an exact 64-byte cache-line boundary
+            // Verify every vehicle's per-wheel arrays start on an exact 64-byte cache-line boundary
             int wheelSize = UnsafeUtility.SizeOf<WheelState>();
-            Assert.AreEqual(0, world.Vehicles[carIdx].WheelStartIndex * wheelSize % 64);
-            Assert.AreEqual(0, world.Vehicles[cabIdx].WheelStartIndex * wheelSize % 64);
-            Assert.AreEqual(0, world.Vehicles[trlIdx].WheelStartIndex * wheelSize % 64);
+            int manifoldSize = UnsafeUtility.SizeOf<ContactManifold>();
+            int carcassSize = UnsafeUtility.SizeOf<TireCarcassState>();
+            int thermalSize = UnsafeUtility.SizeOf<TireThermalAndWearState>();
+
+            int[] starts = { world.Vehicles[carIdx].WheelStartIndex, world.Vehicles[cabIdx].WheelStartIndex, world.Vehicles[trlIdx].WheelStartIndex };
+            foreach (int ws in starts)
+            {
+                Assert.AreEqual(0, ws * wheelSize % 64);
+                Assert.AreEqual(0, ws * manifoldSize % 64);
+                Assert.AreEqual(0, ws * carcassSize % 64);
+                Assert.AreEqual(0, ws * thermalSize % 64);
+            }
         }
 
         [Test]

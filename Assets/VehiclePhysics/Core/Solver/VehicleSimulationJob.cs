@@ -14,7 +14,7 @@ namespace VehiclePhysics.Core
         [ReadOnly] public NativeArray<PowertrainConfig> PowertrainConfigs;
         [ReadOnly] public NativeArray<WheelConfig> WheelConfigs;
         [ReadOnly] public NativeArray<VehicleDriverInput> DriverInputs;
-        [ReadOnly] public NativeArray<WheelContact> WheelContacts;
+        [ReadOnly] public NativeArray<SurfaceMaterialData> SurfaceMaterials;
 
         public NativeArray<VehicleState> Vehicles;
         public NativeArray<PowertrainState> Powertrains;
@@ -22,6 +22,9 @@ namespace VehiclePhysics.Core
 
         [NativeDisableParallelForRestriction] public NativeArray<WheelInput> WheelInputs;
         [NativeDisableParallelForRestriction] public NativeArray<WheelState> Wheels;
+        [NativeDisableParallelForRestriction] public NativeArray<ContactManifold> ContactManifolds;
+        [NativeDisableParallelForRestriction] public NativeArray<TireCarcassState> TireCarcassStates;
+        [NativeDisableParallelForRestriction] public NativeArray<TireThermalAndWearState> TireThermalStates;
 
         public void Execute(int vehIdx)
         {
@@ -55,18 +58,24 @@ namespace VehiclePhysics.Core
             {
                 SteeringAndInputSolver.StepWheelSteering(in veh, in vCfg, dtSub, WheelInputs, Wheels);
 
-                SuspensionSolver.SolveSuspension(ref veh, in vCfg, WheelConfigs, WheelContacts, Wheels);
+                SuspensionSolver.SolveSuspension(
+                    ref veh, in vCfg, WheelConfigs, ContactManifolds, TireCarcassStates, Wheels);
 
                 var tireCache = new FixedStepTireCache();
                 for (int w = 0; w < veh.WheelCount; w++)
                 {
                     int slot = veh.WheelStartIndex + w;
                     WheelConfig wCfg = WheelConfigs[cfgStart + w];
-                    WheelContact contact = WheelContacts[slot];
+                    ContactManifold manifold = ContactManifolds[slot];
+                    TireCarcassState carcass = TireCarcassStates[slot];
+                    TireThermalAndWearState thermal = TireThermalStates[slot];
                     WheelState ws = Wheels[slot];
 
                     TireStepResult res = TireSolver.EvaluateTireForces(
-                        in veh, in vCfg, in wCfg, in contact, ref ws, dtSub);
+                        in veh, in vCfg, in wCfg, in manifold, in thermal,
+                        SurfaceMaterials, ref carcass, ref ws, dtSub);
+
+                    TireCarcassStates[slot] = carcass;
                     Wheels[slot] = ws;
                     tireCache.Set(w, in res);
                 }
@@ -75,16 +84,18 @@ namespace VehiclePhysics.Core
                 {
                     PowertrainSolver.SolveSubstep(
                         in veh, in vCfg, in ptCfg, in driver, ref pt,
-                        WheelConfigs, WheelInputs, WheelContacts, Wheels, in tireCache, dtSub);
+                        WheelConfigs, WheelInputs, ContactManifolds, SurfaceMaterials,
+                        Wheels, in tireCache, dtSub);
                 }
                 else
                 {
                     WheelSpinFallbackSolver.SolveWheelSpinAndBrakes(
-                        in veh, in vCfg, WheelConfigs, WheelInputs, WheelContacts, Wheels, in tireCache, dtSub);
+                        in veh, in vCfg, WheelConfigs, WheelInputs, ContactManifolds,
+                        SurfaceMaterials, Wheels, in tireCache, dtSub);
                 }
 
                 ChassisDynamicsSolver.Integrate6Dof(
-                    ref veh, in vCfg, WheelContacts, Wheels, in tireCache, s == 0, dtSub);
+                    ref veh, in vCfg, ContactManifolds, Wheels, in tireCache, s == 0, dtSub);
             }
 
             pose.CurrentPosition = veh.Position;

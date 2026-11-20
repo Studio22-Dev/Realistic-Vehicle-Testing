@@ -71,7 +71,7 @@ namespace VehiclePhysics.Bridge
 
         // Disjointness guaranteed by unique ActiveWheelSlots mapping
         [NativeDisableParallelForRestriction] public NativeArray<WheelContactSample> ContactSamples;
-        [NativeDisableParallelForRestriction] public NativeArray<WheelContact> WheelContacts;
+        [NativeDisableParallelForRestriction] public NativeArray<ContactManifold> ContactManifolds;
         [NativeDisableParallelForRestriction] public NativeArray<WheelInput> WheelInputs;
 
         public void Execute(int cmdIdx)
@@ -86,7 +86,7 @@ namespace VehiclePhysics.Bridge
             if (veh.LodTier >= 3 || (veh.TierFlags & VehicleTierFlags.IsSleeping) != 0)
             {
                 ContactSamples[sampleSlot] = default;
-                WheelContacts[wheelSlot] = default;
+                ContactManifolds[wheelSlot] = default;
                 wInput.ContactSampleCount = 0;
                 WheelInputs[wheelSlot] = wInput;
                 return;
@@ -96,6 +96,7 @@ namespace VehiclePhysics.Bridge
             bool hasValidHit = false;
             float bestDist = float.MaxValue;
             RaycastHit bestHit = default;
+            ColliderIdKey bestKey = default;
             ColliderPhysicsMeta bestMeta = new ColliderPhysicsMeta { DynamicBodyIndex = -1 };
 
             for (int h = 0; h < MaxHitsPerRay; h++)
@@ -125,6 +126,7 @@ namespace VehiclePhysics.Bridge
                 {
                     bestDist = hit.distance;
                     bestHit = hit;
+                    bestKey = key;
                     bestMeta = meta;
                     hasValidHit = true;
                 }
@@ -133,7 +135,7 @@ namespace VehiclePhysics.Bridge
             if (!hasValidHit)
             {
                 ContactSamples[sampleSlot] = default;
-                WheelContacts[wheelSlot] = default;
+                ContactManifolds[wheelSlot] = default;
                 wInput.ContactSampleCount = 0;
                 WheelInputs[wheelSlot] = wInput;
                 return;
@@ -171,19 +173,43 @@ namespace VehiclePhysics.Bridge
             };
             ContactSamples[sampleSlot] = sample;
 
-            WheelContacts[wheelSlot] = new WheelContact
+            bool isDynamic = bestMeta.DynamicBodyIndex >= 0;
+
+            var c0 = new ManifoldContactPoint
             {
-                PlanePoint = sample.Point,
-                StaticFriction = sample.StaticFriction,
-                PlaneNormal = sample.Normal,
-                DynamicFriction = sample.DynamicFriction,
+                WorldPoint = sample.Point,
+                PenetrationM = pen,
+                WorldNormal = sample.Normal,
+                ContactForceN = 0f,
                 SurfaceVelocity = sample.SurfaceVelocity,
-                RollingResistance = sample.RollingResistance,
-                ContactPatchLength = DefaultPatchLengthM,
-                LateralCoPOffsetLocal = 0f,
-                SurfaceRoughness = sample.SurfaceRoughness,
-                HasContact = 1,
-                SurfaceMaterialType = sample.SurfaceMaterialType
+                ColliderInstanceID = bestKey.GetHashCode(),
+                PendingObjectImpulse = float3.zero,
+                DynamicBodyIndex = bestMeta.DynamicBodyIndex,
+                ContactWeight = 1.0f,
+                LocalFluidOrLooseDepthM = 0f,
+                FrictionScale = 1.0f,
+                SurfaceMaterialIndex = (byte)matIdx,
+                IsValid = 1,
+                SampleCount = 1,
+                ClusterFlags = isDynamic ? ManifoldClusterFlags.HitDynamicBody : ManifoldClusterFlags.None
+            };
+
+            ContactManifolds[wheelSlot] = new ContactManifold
+            {
+                ClusterBottom = c0,
+                BlendedPoint = sample.Point,
+                ContactPatchLengthM = DefaultPatchLengthM,
+                BlendedNormal = sample.Normal,
+                WaterDepthM = 0f,
+                BlendedVelocity = sample.SurfaceVelocity,
+                TerrainSinkageM = 0f,
+                HydroplaningFactor = 0f,
+                BulldozingDragN = 0f,
+                BlendedFrictionScale = 1.0f,
+                ActiveClusterMask = 1 << 0,
+                PrimaryMaterialIndex = (byte)matIdx,
+                IsGrounded = 1,
+                Flags = isDynamic ? ManifoldFlags.TouchesDynamicBody : ManifoldFlags.None
             };
 
             wInput.ContactSampleCount = 1;

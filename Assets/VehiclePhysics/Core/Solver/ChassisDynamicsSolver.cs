@@ -38,7 +38,7 @@ namespace VehiclePhysics.Core
         public static void Integrate6Dof(
             ref VehicleState veh,
             in VehicleConfig vCfg,
-            NativeArray<WheelContact> wheelContacts,
+            NativeArray<ContactManifold> contactManifolds,
             NativeArray<WheelState> wheels,
             in FixedStepTireCache tireCache,
             bool applyExternalImpulses,
@@ -99,10 +99,10 @@ namespace VehiclePhysics.Core
                     continue;
                 }
 
-                WheelContact contact = wheelContacts[slot];
+                ContactManifold manifold = contactManifolds[slot];
                 TireStepResult tr = tireCache.Get(w);
 
-                float3 wheelForce = ws.GroundLoadN * contact.PlaneNormal
+                float3 wheelForce = ws.GroundLoadN * manifold.BlendedNormal
                                   + tr.Fx * tr.LongDir
                                   + tr.Fy * tr.LatDir;
 

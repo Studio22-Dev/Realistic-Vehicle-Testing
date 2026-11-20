@@ -65,7 +65,8 @@ namespace VehiclePhysics.Core
             ref VehicleState veh,
             in VehicleConfig vCfg,
             NativeArray<WheelConfig> wheelConfigs,
-            NativeArray<WheelContact> wheelContacts,
+            NativeArray<ContactManifold> contactManifolds,
+            NativeArray<TireCarcassState> tireCarcassStates,
             NativeArray<WheelState> wheels)
         {
             int start = veh.WheelStartIndex;
@@ -73,12 +74,14 @@ namespace VehiclePhysics.Core
             var arbTracker = new AxleCompressionTracker();
             bool anyGrounded = false;
 
-            // Pass 1: Analytical contact-plane projection, bump stops, and asymmetric dampers
+            // Pass 1: Analytical contact-plane projection, bump stops, and asymmetric dampers.
+            // Audit Fix #3: SuspensionCompression remains strictly hub-to-chassis travel (pure k_s).
             for (int w = 0; w < veh.WheelCount; w++)
             {
                 int slot = start + w;
                 WheelConfig wCfg = wheelConfigs[cfgStart + w];
-                WheelContact contact = wheelContacts[slot];
+                ContactManifold manifold = contactManifolds[slot];
+                TireCarcassState carcass = tireCarcassStates[slot];
                 WheelState ws = wheels[slot];
 
                 if ((ws.WheelFlags & WheelFlagBits.IsDetached) != 0)
@@ -88,17 +91,25 @@ namespace VehiclePhysics.Core
                     ws.SuspensionVelocity = 0f;
                     ws.GroundLoadN = 0f;
                     ws.LastWorldForce = float3.zero;
+                    carcass.EffectiveLoadedRadiusM = wCfg.UnloadedRadiusM;
+                    carcass.CarcassDeflectionLocal.y = 0f;
+                    carcass.RimGroundLoadN = 0f;
+                    tireCarcassStates[slot] = carcass;
                     wheels[slot] = ws;
                     continue;
                 }
 
-                if (contact.HasContact == 0)
+                if (manifold.IsGrounded == 0)
                 {
                     ws.WheelFlags = (byte)(ws.WheelFlags & ~WheelFlagBits.IsGrounded);
                     ws.SuspensionCompression = 0f;
                     ws.SuspensionVelocity = 0f;
                     ws.GroundLoadN = 0f;
                     ws.EffectiveRollingRadius = wCfg.UnloadedRadiusM;
+                    carcass.EffectiveLoadedRadiusM = wCfg.UnloadedRadiusM;
+                    carcass.CarcassDeflectionLocal.y = 0f;
+                    carcass.RimGroundLoadN = 0f;
+                    tireCarcassStates[slot] = carcass;
                     wheels[slot] = ws;
                     arbTracker.Accumulate(wCfg.AxleIndex, wCfg.SideIndex, 0f);
                     continue;
@@ -110,7 +121,7 @@ namespace VehiclePhysics.Core
                     math.rotate(veh.Rotation, wCfg.StrutAxisLocal),
                     new float3(0f, -1f, 0f));
 
-                float3 n = contact.PlaneNormal;
+                float3 n = manifold.BlendedNormal;
                 float cosAngle = -math.dot(worldStrut, n);
                 if (cosAngle <= 0.1f)
                 {
@@ -119,13 +130,17 @@ namespace VehiclePhysics.Core
                     ws.SuspensionVelocity = 0f;
                     ws.GroundLoadN = 0f;
                     ws.EffectiveRollingRadius = wCfg.UnloadedRadiusM;
+                    carcass.EffectiveLoadedRadiusM = wCfg.UnloadedRadiusM;
+                    carcass.CarcassDeflectionLocal.y = 0f;
+                    carcass.RimGroundLoadN = 0f;
+                    tireCarcassStates[slot] = carcass;
                     wheels[slot] = ws;
                     arbTracker.Accumulate(wCfg.AxleIndex, wCfg.SideIndex, 0f);
                     continue;
                 }
 
                 float denom = math.max(cosAngle, 0.25f);
-                float distToPlane = math.dot(worldMount - contact.PlanePoint, n) / denom;
+                float distToPlane = math.dot(worldMount - manifold.BlendedPoint, n) / denom;
                 float reqStrutLength = distToPlane - wCfg.UnloadedRadiusM;
                 float rawCompression = wCfg.RestLengthM - reqStrutLength;
 
@@ -136,6 +151,10 @@ namespace VehiclePhysics.Core
                     ws.SuspensionVelocity = 0f;
                     ws.GroundLoadN = 0f;
                     ws.EffectiveRollingRadius = wCfg.UnloadedRadiusM;
+                    carcass.EffectiveLoadedRadiusM = wCfg.UnloadedRadiusM;
+                    carcass.CarcassDeflectionLocal.y = 0f;
+                    carcass.RimGroundLoadN = 0f;
+                    tireCarcassStates[slot] = carcass;
                     wheels[slot] = ws;
                     arbTracker.Accumulate(wCfg.AxleIndex, wCfg.SideIndex, 0f);
                     continue;
@@ -149,7 +168,7 @@ namespace VehiclePhysics.Core
 
                 float3 vMount = veh.LinearVelocity
                               + math.cross(veh.AngularVelocity, worldMount - veh.Position)
-                              - contact.SurfaceVelocity;
+                              - manifold.BlendedVelocity;
                 float compVel = -math.dot(vMount, n) / math.max(cosAngle, 0.5f);
 
                 float springForce = wCfg.SpringStiffnessNPerM * clampedComp
@@ -168,7 +187,8 @@ namespace VehiclePhysics.Core
             if (anyGrounded) veh.TierFlags |= VehicleTierFlags.IsGroundedAny;
             else veh.TierFlags = (byte)(veh.TierFlags & ~VehicleTierFlags.IsGroundedAny);
 
-            // Pass 2: Apply Anti-Roll Bar load transfer and enforce unilateral constraint Fz >= 0
+            // Pass 2: Apply Anti-Roll Bar load transfer, enforce unilateral Fz >= 0,
+            // and mirror loaded radius / vertical squish into TireCarcassState.
             for (int w = 0; w < veh.WheelCount; w++)
             {
                 int slot = start + w;
@@ -177,6 +197,8 @@ namespace VehiclePhysics.Core
                     continue;
 
                 WheelConfig wCfg = wheelConfigs[cfgStart + w];
+                TireCarcassState carcass = tireCarcassStates[slot];
+
                 float kArb = wCfg.AxleIndex == 0
                     ? vCfg.FrontAntiRollStiffnessNPerM
                     : vCfg.RearAntiRollStiffnessNPerM;
@@ -187,10 +209,21 @@ namespace VehiclePhysics.Core
                 float fz = math.max(0f, ws.GroundLoadN + arbForce);
                 ws.GroundLoadN = fz;
 
-                float tireSquish = math.min(wCfg.MaxRadialSquishM,
-                    fz / math.max(wCfg.RadialTireStiffnessNPerM, 1e4f));
-                ws.EffectiveRollingRadius = math.max(0.05f, wCfg.UnloadedRadiusM - tireSquish);
+                float radialK = carcass.RadialStiffnessNPerM > 1e3f
+                    ? carcass.RadialStiffnessNPerM
+                    : math.max(wCfg.RadialTireStiffnessNPerM, 1e4f);
+                float maxSquish = wCfg.MaxRadialSquishM > 0f
+                    ? wCfg.MaxRadialSquishM
+                    : math.max(0.02f, wCfg.UnloadedRadiusM - carcass.RimRadiusM);
 
+                float tireSquish = math.min(maxSquish, fz / radialK);
+                float loadedRadius = math.max(0.05f, wCfg.UnloadedRadiusM - tireSquish);
+
+                ws.EffectiveRollingRadius = loadedRadius;
+                carcass.EffectiveLoadedRadiusM = loadedRadius;
+                carcass.CarcassDeflectionLocal.y = tireSquish;
+
+                tireCarcassStates[slot] = carcass;
                 wheels[slot] = ws;
             }
         }

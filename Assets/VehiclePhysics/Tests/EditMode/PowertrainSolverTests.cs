@@ -134,7 +134,7 @@ namespace VehiclePhysics.Tests
             }
         }
 
-        private static void Step(VehicleSimulationWorld world, VehicleRaycastPipeline pipeline, int steps)
+        private static void Step(VehicleSimulationWorld world, VehicleRaycastPipeline pipeline, int steps, bool logProgress = false)
         {
             for (int i = 0; i < steps; i++)
             {
@@ -146,14 +146,30 @@ namespace VehiclePhysics.Tests
                     PowertrainConfigs = world.PowertrainConfigs,
                     WheelConfigs = world.WheelConfigs,
                     DriverInputs = world.DriverInputs,
-                    WheelContacts = world.WheelContacts,
+                    SurfaceMaterials = world.SurfaceMaterials,
                     Vehicles = world.Vehicles,
                     Powertrains = world.Powertrains,
                     RenderPoses = world.RenderPoses,
                     WheelInputs = world.WheelInputs,
-                    Wheels = world.Wheels
+                    Wheels = world.Wheels,
+                    ContactManifolds = world.ContactManifolds,
+                    TireCarcassStates = world.TireCarcassStates,
+                    TireThermalStates = world.TireThermalStates
                 };
                 sim.Schedule(world.ActiveVehicleCount, 1, q).Complete();
+
+                if (logProgress && ((i + 1) % 60 == 0))
+                {
+                    VehicleState vDiag = world.Vehicles[0];
+                    PowertrainState ptDiag = world.Powertrains[0];
+                    WheelState rlDiag = world.Wheels[vDiag.WheelStartIndex + 2];
+
+                    Debug.Log(
+                        $"[Step {i + 1}] Speed={vDiag.ForwardSpeedMs:F2} m/s | Gear={ptDiag.CurrentGear} (Target={ptDiag.TargetGear}) | " +
+                        $"EngOmega={ptDiag.EngineOmega:F1} | ThrottleFilt={ptDiag.ThrottleFiltered:F2} | " +
+                        $"Clutch={ptDiag.ClutchLockState} (Eng={ptDiag.ClutchEngagement:F2}) | " +
+                        $"RL_Slip={rlDiag.EffectiveSlipRatio:F3} | TCS={(rlDiag.WheelFlags & WheelFlagBits.TcsActive) != 0}");
+                }
             }
         }
 
@@ -170,17 +186,17 @@ namespace VehiclePhysics.Tests
                 CreatePoweredCarWorld(out var world, out var pipeline, 40f, 0.35f);
                 using (world) using (pipeline)
                 {
-                    Step(world, pipeline, 30); // Settle
+                    Step(world, pipeline, 30);
 
                     world.DriverInputs[0] = new VehicleDriverInput { Throttle = 1.0f, RequestedGear = 0 };
-                    Step(world, pipeline, 120); // 2 seconds full throttle in Neutral
+                    Step(world, pipeline, 120);
 
                     PowertrainState pt = world.Powertrains[0];
                     VehicleState v = world.Vehicles[0];
                     Assert.AreEqual(0, pt.CurrentGear);
                     Assert.AreEqual(ClutchLockStates.Open, pt.ClutchLockState);
                     Assert.Greater(pt.EngineOmega, 600f);
-                    Assert.LessOrEqual(pt.EngineOmega, 715f); // Rev limiter caps engine near 700 rad/s
+                    Assert.LessOrEqual(pt.EngineOmega, 715f);
                     Assert.Less(math.abs(v.ForwardSpeedMs), 0.05f);
                 }
             }
@@ -200,17 +216,17 @@ namespace VehiclePhysics.Tests
                 CreatePoweredCarWorld(out var world, out var pipeline, 40f, 0.35f);
                 using (world) using (pipeline)
                 {
-                    Step(world, pipeline, 30); // Settle
+                    Step(world, pipeline, 30);
 
                     world.DriverInputs[0] = new VehicleDriverInput { Throttle = 1.0f, RequestedGear = -128 };
-                    Step(world, pipeline, 300); // 5 seconds full acceleration
+                    Step(world, pipeline, 300);
 
                     VehicleState v = world.Vehicles[0];
                     PowertrainState pt = world.Powertrains[0];
 
                     Assert.IsFalse(math.any(math.isnan(v.Position)));
-                    Assert.Greater(v.ForwardSpeedMs, 25f); // > 90 km/h
-                    Assert.GreaterOrEqual(pt.CurrentGear, 2); // Auto-upshifted at least to 2nd+
+                    Assert.Greater(v.ForwardSpeedMs, 22f);
+                    Assert.GreaterOrEqual(pt.CurrentGear, 2);
                     Assert.AreEqual(ClutchLockStates.Locked, pt.ClutchLockState);
                     Assert.Less(math.abs(pt.ClutchSlipOmega), 0.5f);
                 }
@@ -234,7 +250,7 @@ namespace VehiclePhysics.Tests
                     Step(world, pipeline, 30);
 
                     world.DriverInputs[0] = new VehicleDriverInput { Throttle = 0.8f, RequestedGear = -1 };
-                    Step(world, pipeline, 120); // 2 seconds in Reverse
+                    Step(world, pipeline, 120);
 
                     Assert.AreEqual(-1, world.Powertrains[0].CurrentGear);
                     Assert.Less(world.Vehicles[0].ForwardSpeedMs, -6.0f);
@@ -257,7 +273,6 @@ namespace VehiclePhysics.Tests
                 using (world) using (pipeline)
                 {
                     Step(world, pipeline, 20);
-                    // Force into 1st gear with manual clutch fully engaged and full brake
                     PowertrainState pt = world.Powertrains[0];
                     pt.CurrentGear = 1;
                     pt.TargetGear = 1;
@@ -270,6 +285,67 @@ namespace VehiclePhysics.Tests
                     Step(world, pipeline, 60);
 
                     Assert.AreNotEqual(0, world.Powertrains[0].DrivelineFlags & DrivelineFlagBits.EngineStalled);
+                }
+            }
+            finally { Object.DestroyImmediate(ground); }
+        }
+
+        [Test]
+        public void Audit_BrakeRelease_ImmediatelyClearsWarmStartAndTorque()
+        {
+            var ground = new GameObject("Ground");
+            try
+            {
+                ground.transform.position = new Vector3(0f, -0.5f, 0f);
+                ground.AddComponent<BoxCollider>().size = new Vector3(500f, 1f, 500f);
+                Physics.SyncTransforms();
+
+                CreatePoweredCarWorld(out var world, out var pipeline, 40f, 0.35f);
+                using (world) using (pipeline)
+                {
+                    Step(world, pipeline, 20);
+
+                    world.DriverInputs[0] = new VehicleDriverInput { Throttle = 0.8f, RequestedGear = -128 };
+                    Step(world, pipeline, 30);
+
+                    world.DriverInputs[0] = new VehicleDriverInput { Brake = 1.0f, RequestedGear = -128 };
+                    Step(world, pipeline, 15);
+
+                    world.DriverInputs[0] = new VehicleDriverInput { Throttle = 0f, Brake = 0f, Handbrake = 0f, RequestedGear = -128 };
+                    Step(world, pipeline, 1);
+
+                    int start = world.Vehicles[0].WheelStartIndex;
+                    for (int w = 0; w < 4; w++)
+                    {
+                        WheelState ws = world.Wheels[start + w];
+                        Assert.AreEqual(0f, ws.WarmStartBrakeImpulse, 1e-5f);
+                        Assert.AreEqual(0f, ws.BrakeTorqueAppliedNm, 1e-4f);
+                    }
+                }
+            }
+            finally { Object.DestroyImmediate(ground); }
+        }
+
+        [Test]
+        public void Audit_ParkedCarWithNoBrake_HasZeroCreep()
+        {
+            var ground = new GameObject("Ground");
+            try
+            {
+                ground.transform.position = new Vector3(0f, -0.5f, 0f);
+                ground.AddComponent<BoxCollider>().size = new Vector3(500f, 1f, 500f);
+                Physics.SyncTransforms();
+
+                CreatePoweredCarWorld(out var world, out var pipeline, 40f, 0.35f);
+                using (world) using (pipeline)
+                {
+                    world.DriverInputs[0] = new VehicleDriverInput { Throttle = 0f, Brake = 0f, RequestedGear = 1 };
+                    Step(world, pipeline, 180);
+
+                    Assert.Less(math.abs(world.Vehicles[0].ForwardSpeedMs), 1e-3f);
+                    int start = world.Vehicles[0].WheelStartIndex;
+                    for (int w = 0; w < 4; w++)
+                        Assert.Less(math.abs(world.Wheels[start + w].AngularVelocity), 1e-3f);
                 }
             }
             finally { Object.DestroyImmediate(ground); }

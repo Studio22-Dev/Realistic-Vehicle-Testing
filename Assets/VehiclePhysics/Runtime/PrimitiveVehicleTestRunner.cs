@@ -202,6 +202,7 @@ namespace VehiclePhysics.Runtime
                     MountPositionLocal = new float3(x, 0f, z),
                     StrutAxisLocal = new float3(0f, -1f, 0f),
                     UnloadedRadiusM = 0.33f,
+                    RimRadiusM = 0.215f,
                     RestLengthM = 0.40f,
                     MaxTravelM = 0.28f,
                     SpringStiffnessNPerM = 35000f,
@@ -210,6 +211,7 @@ namespace VehiclePhysics.Runtime
                     BumpStopStiffnessNPerM = 180000f,
                     WheelInertiaKgM2 = 1.1f,
                     RadialTireStiffnessNPerM = 220000f,
+                    RadialStiffnessNPerM = 220000f,
                     MaxRadialSquishM = 0.05f,
                     RelaxationLengthX = 0.25f,
                     RelaxationLengthY = 0.40f,
@@ -220,6 +222,9 @@ namespace VehiclePhysics.Runtime
                     TirePeakMuScale = 1.0f,
                     TireSlideMuScale = 1.0f,
                     LowSpeedDampMaxForceScale = 1.5f,
+                    NominalPressureKPa = 220f,
+                    InitialTreadDepthMm = 8.0f,
+                    CompoundType = TireCompoundType.Street,
                     AxleIndex = axle,
                     SideIndex = side,
                     DefaultControlFlags = flags
@@ -293,12 +298,25 @@ namespace VehiclePhysics.Runtime
 
             for (int w = 0; w < v.WheelCount; w++)
             {
-                WheelState ws = _world.Wheels[v.WheelStartIndex + w];
+                int slot = v.WheelStartIndex + w;
+                WheelState ws = _world.Wheels[slot];
                 ws.AngularVelocity = initialLaunchSpeedMs / math.max(ws.EffectiveRollingRadius, 0.1f);
                 ws.LongitudinalDeflection = 0f;
                 ws.LateralDeflection = 0f;
                 ws.WarmStartBrakeImpulse = 0f;
-                _world.Wheels[v.WheelStartIndex + w] = ws;
+                _world.Wheels[slot] = ws;
+
+                _world.ContactManifolds[slot] = default;
+
+                TireCarcassState carcass = _world.TireCarcassStates[slot];
+                carcass.CarcassDeflectionLocal = float3.zero;
+                carcass.CarcassVelocityLocal = float3.zero;
+                carcass.TorsionalTwistRad = 0f;
+                carcass.TorsionalTwistRateRadS = 0f;
+                carcass.PneumaticTrailM = 0f;
+                carcass.SelfAligningTorqueNm = 0f;
+                carcass.RimGroundLoadN = 0f;
+                _world.TireCarcassStates[slot] = carcass;
             }
         }
 
@@ -410,12 +428,15 @@ namespace VehiclePhysics.Runtime
                 PowertrainConfigs = _world.PowertrainConfigs,
                 WheelConfigs = _world.WheelConfigs,
                 DriverInputs = _world.DriverInputs,
-                WheelContacts = _world.WheelContacts,
+                SurfaceMaterials = _world.SurfaceMaterials,
                 Vehicles = _world.Vehicles,
                 Powertrains = _world.Powertrains,
                 RenderPoses = _world.RenderPoses,
                 WheelInputs = _world.WheelInputs,
-                Wheels = _world.Wheels
+                Wheels = _world.Wheels,
+                ContactManifolds = _world.ContactManifolds,
+                TireCarcassStates = _world.TireCarcassStates,
+                TireThermalStates = _world.TireThermalStates
             };
 
             simJob.Schedule(_world.ActiveVehicleCount, 1, queryHandle).Complete();
@@ -447,7 +468,7 @@ namespace VehiclePhysics.Runtime
             }
             bool stalled = (pt.DrivelineFlags & DrivelineFlagBits.EngineStalled) != 0;
 
-            GUI.Box(new Rect(14, 14, 320, 175), "Vehicle Physics Telemetry (Phase 1)");
+            GUI.Box(new Rect(14, 14, 320, 175), "Vehicle Physics Telemetry (Phase 2 Step 1)");
             GUI.Label(new Rect(24, 38, 300, 22), $"Speed: {kmh:F1} km/h  |  Gear: {gearStr}  |  RPM: {rpm:F0}");
             GUI.Label(new Rect(24, 58, 300, 22), $"Clutch: {clutchStr} ({pt.ClutchEngagement:P0}) | Slip: {pt.ClutchSlipOmega:F1} rad/s");
             GUI.Label(new Rect(24, 78, 300, 22), $"Engine: {pt.EngineTorqueNm:F0} Nm  |  Clutch Out: {pt.ClutchTorqueNm:F0} Nm");
@@ -466,8 +487,9 @@ namespace VehiclePhysics.Runtime
             for (int w = 0; w < veh.WheelCount; w++)
             {
                 WheelConfig wCfg = _world.WheelConfigs[vCfg.WheelConfigStartIndex + w];
-                WheelState ws = _world.Wheels[veh.WheelStartIndex + w];
-                WheelContact contact = _world.WheelContacts[veh.WheelStartIndex + w];
+                int slot = veh.WheelStartIndex + w;
+                WheelState ws = _world.Wheels[slot];
+                ContactManifold manifold = _world.ContactManifolds[slot];
 
                 float3 mountWorld = veh.Position
                     + math.rotate(veh.Rotation, wCfg.MountPositionLocal - vCfg.CenterOfMassLocalOffset);
@@ -478,14 +500,14 @@ namespace VehiclePhysics.Runtime
                 Gizmos.DrawLine(mountWorld, hubWorld);
                 Gizmos.DrawWireSphere(hubWorld, 0.04f);
 
-                if (contact.HasContact != 0)
+                if (manifold.IsGrounded != 0)
                 {
                     Gizmos.color = (ws.WheelFlags & WheelFlagBits.IsGrounded) != 0 ? Color.green : Color.gray;
-                    Gizmos.DrawWireSphere(contact.PlanePoint, 0.05f);
-                    Gizmos.DrawRay(contact.PlanePoint, contact.PlaneNormal * 0.35f);
+                    Gizmos.DrawWireSphere(manifold.BlendedPoint, 0.05f);
+                    Gizmos.DrawRay(manifold.BlendedPoint, manifold.BlendedNormal * 0.35f);
 
                     Gizmos.color = Color.cyan;
-                    Gizmos.DrawRay(contact.PlanePoint, ws.LastWorldForce * 0.00025f);
+                    Gizmos.DrawRay(manifold.BlendedPoint, ws.LastWorldForce * 0.00025f);
                 }
             }
         }

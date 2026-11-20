@@ -7,6 +7,8 @@ namespace VehiclePhysics.Core
     public sealed class VehicleSimulationWorld : IDisposable
     {
         // 4 * 80B (WheelState) = 320B = 5 x 64B cache lines.
+        // 4 * 384B (ContactManifold) = 1536B = 24 x 64B cache lines.
+        // 4 * 128B (TireCarcassState / TireThermalAndWearState) = 512B = 8 x 64B cache lines.
         // Rounding each vehicle's wheel allocation up to a multiple of 4 prevents false sharing.
         public const int WheelCacheAlignmentStride = 4;
 
@@ -31,7 +33,9 @@ namespace VehiclePhysics.Core
         // Mutable Per-Wheel State (indexed via VehicleState.WheelStartIndex + w)
         public NativeArray<WheelState> Wheels;
         public NativeArray<WheelInput> WheelInputs;
-        public NativeArray<WheelContact> WheelContacts;
+        public NativeArray<ContactManifold> ContactManifolds;
+        public NativeArray<TireCarcassState> TireCarcassStates;
+        public NativeArray<TireThermalAndWearState> TireThermalStates;
         public NativeArray<WheelContactSample> ContactSamples;
 
         // Read-Only Archetype Configs & Surface Table
@@ -78,7 +82,9 @@ namespace VehiclePhysics.Core
 
             Wheels = new NativeArray<WheelState>(MaxTotalWheelSlots, Allocator.Persistent);
             WheelInputs = new NativeArray<WheelInput>(MaxTotalWheelSlots, Allocator.Persistent);
-            WheelContacts = new NativeArray<WheelContact>(MaxTotalWheelSlots, Allocator.Persistent);
+            ContactManifolds = new NativeArray<ContactManifold>(MaxTotalWheelSlots, Allocator.Persistent);
+            TireCarcassStates = new NativeArray<TireCarcassState>(MaxTotalWheelSlots, Allocator.Persistent);
+            TireThermalStates = new NativeArray<TireThermalAndWearState>(MaxTotalWheelSlots, Allocator.Persistent);
             ContactSamples = new NativeArray<WheelContactSample>(
                 MaxTotalWheelSlots * MaxSamplesPerWheel, Allocator.Persistent);
 
@@ -203,23 +209,7 @@ namespace VehiclePhysics.Core
             {
                 int slot = wheelStart + w;
                 WheelConfig wCfg = WheelConfigs[cfgWheelBase + w];
-
-                Wheels[slot] = new WheelState
-                {
-                    EffectiveRollingRadius = wCfg.UnloadedRadiusM,
-                    AxleIndex = wCfg.AxleIndex,
-                    SideIndex = wCfg.SideIndex
-                };
-
-                WheelInputs[slot] = new WheelInput
-                {
-                    ContactSampleStartIndex = slot * MaxSamplesPerWheel,
-                    ContactSampleCount = 0,
-                    ControlFlags = wCfg.DefaultControlFlags,
-                    PatchMode = 0
-                };
-
-                WheelContacts[slot] = default;
+                InitializeWheelSlot(slot, in wCfg);
             }
 
             TopologyVersion++;
@@ -228,7 +218,8 @@ namespace VehiclePhysics.Core
 
         /// <summary>
         /// Detaches or reattaches/repairs a wheel slot safely in place without shifting array indices.
-        /// Automatically clears contacts, resets spin/deflection on repair, updates vehicle mass, and flags raycast topology dirty.
+        /// Automatically clears manifolds, resets spin/carcass/thermal state on repair, updates vehicle mass,
+        /// and flags raycast topology dirty.
         /// </summary>
         public void SetWheelDetached(int vehicleIndex, int localWheelIndex, bool detached, float wheelUnsprungMassKg = 22f)
         {
@@ -242,6 +233,9 @@ namespace VehiclePhysics.Core
             WheelState ws = Wheels[slot];
             bool wasDetached = (ws.WheelFlags & WheelFlagBits.IsDetached) != 0;
             if (wasDetached == detached) return;
+
+            VehicleConfig cfg = VehicleConfigs[veh.ConfigIndex];
+            WheelConfig wCfg = WheelConfigs[cfg.WheelConfigStartIndex + localWheelIndex];
 
             if (detached)
             {
@@ -260,43 +254,94 @@ namespace VehiclePhysics.Core
                 ws.WarmStartBrakeImpulse = 0f;
                 ws.FrictionUtilization = 0f;
                 ws.LastWorldForce = float3.zero;
+                Wheels[slot] = ws;
 
-                WheelContacts[slot] = default;
+                ContactManifolds[slot] = default;
+
                 WheelInput wIn = WheelInputs[slot];
                 wIn.ContactSampleCount = 0;
                 WheelInputs[slot] = wIn;
             }
             else
             {
-                WheelConfig wCfg = WheelConfigs[VehicleConfigs[veh.ConfigIndex].WheelConfigStartIndex + localWheelIndex];
-                ws.WheelFlags = (byte)(ws.WheelFlags & ~WheelFlagBits.IsDetached);
-                ws.AngularVelocity = 0f;
-                ws.SuspensionCompression = 0f;
-                ws.SuspensionVelocity = 0f;
-                ws.GroundLoadN = 0f;
-                ws.LongitudinalDeflection = 0f;
-                ws.LateralDeflection = 0f;
-                ws.EffectiveRollingRadius = wCfg.UnloadedRadiusM;
-                ws.WarmStartBrakeImpulse = 0f;
-                ws.LastWorldForce = float3.zero;
+                InitializeWheelSlot(slot, in wCfg);
             }
 
-            Wheels[slot] = ws;
-
             // Drift-free mass update from VehicleConfig.MassKg based on detached wheel count
-            int detachedCount = 0;
+            float removedMassKg = 0f;
             for (int w = 0; w < veh.WheelCount; w++)
             {
                 if ((Wheels[veh.WheelStartIndex + w].WheelFlags & WheelFlagBits.IsDetached) != 0)
-                    detachedCount++;
+                {
+                    WheelConfig dCfg = WheelConfigs[cfg.WheelConfigStartIndex + w];
+                    removedMassKg += dCfg.UnsprungMassKg > 0f ? dCfg.UnsprungMassKg : wheelUnsprungMassKg;
+                }
             }
 
-            VehicleConfig cfg = VehicleConfigs[veh.ConfigIndex];
-            float liveMass = math.max(cfg.MassKg - detachedCount * wheelUnsprungMassKg, cfg.MassKg * 0.25f);
+            float liveMass = math.max(cfg.MassKg - removedMassKg, cfg.MassKg * 0.25f);
             veh.InverseMass = 1.0f / math.max(liveMass, 1.0f);
             Vehicles[vehicleIndex] = veh;
 
             TopologyVersion++;
+        }
+
+        private void InitializeWheelSlot(int slot, in WheelConfig wCfg)
+        {
+            float unloadedR = math.max(wCfg.UnloadedRadiusM, 0.10f);
+            float rimRadius = wCfg.RimRadiusM > 0f
+                ? math.min(wCfg.RimRadiusM, unloadedR * 0.90f)
+                : unloadedR * 0.62f;
+            float coldPressureKPa = wCfg.NominalPressureKPa > 0f ? wCfg.NominalPressureKPa : 220f;
+            float treadDepthMm = wCfg.InitialTreadDepthMm > 0f ? wCfg.InitialTreadDepthMm : 8.0f;
+
+            float radialK = wCfg.RadialStiffnessNPerM > 0f
+                ? wCfg.RadialStiffnessNPerM
+                : (wCfg.RadialTireStiffnessNPerM > 0f ? wCfg.RadialTireStiffnessNPerM : 210000f);
+            float lateralK = wCfg.LateralStiffnessNPerM > 0f ? wCfg.LateralStiffnessNPerM : radialK * 0.55f;
+            float longK = wCfg.LongitudinalStiffnessNPerM > 0f ? wCfg.LongitudinalStiffnessNPerM : radialK * 0.70f;
+
+            Wheels[slot] = new WheelState
+            {
+                EffectiveRollingRadius = wCfg.UnloadedRadiusM,
+                AxleIndex = wCfg.AxleIndex,
+                SideIndex = wCfg.SideIndex
+            };
+
+            WheelInputs[slot] = new WheelInput
+            {
+                ContactSampleStartIndex = slot * MaxSamplesPerWheel,
+                ContactSampleCount = 0,
+                ControlFlags = wCfg.DefaultControlFlags,
+                PatchMode = 0
+            };
+
+            ContactManifolds[slot] = default;
+
+            TireCarcassStates[slot] = new TireCarcassState
+            {
+                RimRadiusM = rimRadius,
+                EffectiveLoadedRadiusM = wCfg.UnloadedRadiusM,
+                RadialStiffnessNPerM = radialK,
+                LateralStiffnessNPerM = lateralK,
+                LongitudinalStiffnessNPerM = longK,
+                InternalPressureKPa = coldPressureKPa,
+                ColdReferencePressureKPa = coldPressureKPa,
+                CarcassIntegrity = 1.0f,
+                BeadSeatingIntegrity = 1.0f,
+                RimStructuralHealth = 1.0f,
+                RimType = (byte)wCfg.RimType
+            };
+
+            TireThermalStates[slot] = new TireThermalAndWearState
+            {
+                TreadSurfaceTempC = new float3(25.0f),
+                TreadSubsurfaceTempC = new float3(25.0f),
+                CarcassBulkTempC = 25.0f,
+                CoreGasTempC = 25.0f,
+                RemainingTreadDepthMm = new float3(treadDepthMm),
+                CurrentThermalGripScale = 1.0f,
+                CompoundType = (byte)wCfg.CompoundType
+            };
         }
 
         public void ResetActiveVehicles()
@@ -317,7 +362,9 @@ namespace VehiclePhysics.Core
             if (RenderPoses.IsCreated) RenderPoses.Dispose();
             if (Wheels.IsCreated) Wheels.Dispose();
             if (WheelInputs.IsCreated) WheelInputs.Dispose();
-            if (WheelContacts.IsCreated) WheelContacts.Dispose();
+            if (ContactManifolds.IsCreated) ContactManifolds.Dispose();
+            if (TireCarcassStates.IsCreated) TireCarcassStates.Dispose();
+            if (TireThermalStates.IsCreated) TireThermalStates.Dispose();
             if (ContactSamples.IsCreated) ContactSamples.Dispose();
             if (VehicleConfigs.IsCreated) VehicleConfigs.Dispose();
             if (PowertrainConfigs.IsCreated) PowertrainConfigs.Dispose();

@@ -1,3 +1,4 @@
+using Unity.Collections;
 using Unity.Mathematics;
 
 namespace VehiclePhysics.Core
@@ -18,11 +19,16 @@ namespace VehiclePhysics.Core
             in VehicleState veh,
             in VehicleConfig vCfg,
             in WheelConfig wCfg,
-            in WheelContact contact,
+            in ContactManifold manifold,
+            in TireThermalAndWearState thermal,
+            NativeArray<SurfaceMaterialData> surfaceMaterials,
+            ref TireCarcassState carcass,
             ref WheelState ws,
             float dtSub)
         {
-            if ((ws.WheelFlags & WheelFlagBits.IsGrounded) == 0 || ws.GroundLoadN <= 1e-3f)
+            if ((ws.WheelFlags & WheelFlagBits.IsGrounded) == 0 ||
+                manifold.IsGrounded == 0 ||
+                ws.GroundLoadN <= 1e-3f)
             {
                 // Decay carcass deflection rapidly when airborne.
                 float airDecay = 1.0f / (1.0f + 25.0f * dtSub);
@@ -32,6 +38,12 @@ namespace VehiclePhysics.Core
                 ws.EffectiveSlipAngleRad = 0f;
                 ws.FrictionUtilization = 0f;
                 ws.LastWorldForce = float3.zero;
+
+                carcass.CarcassDeflectionLocal.x = ws.LongitudinalDeflection;
+                carcass.CarcassDeflectionLocal.z = ws.LateralDeflection;
+                carcass.CarcassVelocityLocal = float3.zero;
+                carcass.PneumaticTrailM = 0f;
+                carcass.SelfAligningTorqueNm = 0f;
                 return default;
             }
 
@@ -44,8 +56,8 @@ namespace VehiclePhysics.Core
             // Instantaneous hub & contact-patch point projected directly under the wheel
             // (eliminates fixed-step horizontal lever-arm lag at high speeds).
             float3 hubPos = worldMount + worldStrut * (wCfg.RestLengthM - ws.SuspensionCompression);
-            float3 n = contact.PlaneNormal;
-            float hubDistToPlane = math.dot(hubPos - contact.PlanePoint, n);
+            float3 n = manifold.BlendedNormal;
+            float hubDistToPlane = math.dot(hubPos - manifold.BlendedPoint, n);
             float3 patchPos = hubPos - n * hubDistToPlane;
 
             // Steered wheel forward axis (+Z rotated around local +Y; +steer turns Right/+X)
@@ -58,7 +70,7 @@ namespace VehiclePhysics.Core
 
             float3 vRel = veh.LinearVelocity
                         + math.cross(veh.AngularVelocity, patchPos - veh.Position)
-                        - contact.SurfaceVelocity;
+                        - manifold.BlendedVelocity;
 
             float vx = math.dot(vRel, tLong);
             float vy = math.dot(vRel, tLat);
@@ -76,8 +88,10 @@ namespace VehiclePhysics.Core
             // Unconditionally stable Backward-Euler 1st-order carcass relaxation
             float dx = absVx / sigX * dtSub;
             float dy = absVx / sigY * dtSub;
-            float ux = (ws.LongitudinalDeflection + vSlipX * dtSub) / (1.0f + dx);
-            float uy = (ws.LateralDeflection + vSlipY * dtSub) / (1.0f + dy);
+            float prevUx = ws.LongitudinalDeflection;
+            float prevUy = ws.LateralDeflection;
+            float ux = (prevUx + vSlipX * dtSub) / (1.0f + dx);
+            float uy = (prevUy + vSlipY * dtSub) / (1.0f + dy);
 
             float sx = ux / (sigX * peakKappa);
             float sy = uy / (sigY * peakTanAlpha);
@@ -95,17 +109,31 @@ namespace VehiclePhysics.Core
                 s = windupCap;
             }
 
+            float invDt = 1.0f / math.max(dtSub, 1e-6f);
             ws.LongitudinalDeflection = ux;
             ws.LateralDeflection = uy;
             ws.EffectiveSlipRatio = sx * peakKappa;
             ws.EffectiveSlipAngleRad = math.atan(sy * peakTanAlpha);
             ws.FrictionUtilization = s;
 
+            carcass.CarcassDeflectionLocal.x = ux;
+            carcass.CarcassDeflectionLocal.z = uy;
+            carcass.CarcassVelocityLocal.x = (ux - prevUx) * invDt;
+            carcass.CarcassVelocityLocal.z = (uy - prevUy) * invDt;
+
+            int matIdx = math.clamp(manifold.PrimaryMaterialIndex, 0, surfaceMaterials.Length - 1);
+            SurfaceMaterialData mat = surfaceMaterials[matIdx];
+            float colliderMuScale = manifold.BlendedFrictionScale > 0f ? manifold.BlendedFrictionScale : 1.0f;
+            float thermalGripScale = thermal.CurrentThermalGripScale > 0f ? thermal.CurrentThermalGripScale : 1.0f;
+
             float fz = ws.GroundLoadN;
-            float muPeakX = contact.StaticFriction * wCfg.TirePeakMuScale;
-            float muSlideX = contact.DynamicFriction * wCfg.TireSlideMuScale;
-            float muPeakY = contact.StaticFriction * wCfg.TirePeakMuScale;
-            float muSlideY = contact.DynamicFriction * wCfg.TireSlideMuScale;
+            float basePeakMu = mat.StaticFriction * mat.TireGripMultiplier * colliderMuScale * thermalGripScale;
+            float baseSlideMu = mat.DynamicFriction * mat.TireGripMultiplier * colliderMuScale * thermalGripScale;
+
+            float muPeakX = basePeakMu * wCfg.TirePeakMuScale;
+            float muSlideX = baseSlideMu * wCfg.TireSlideMuScale;
+            float muPeakY = basePeakMu * wCfg.TirePeakMuScale;
+            float muSlideY = baseSlideMu * wCfg.TireSlideMuScale;
 
             // C1-continuous, zero-singularity combined slip curve (exact peak=1.0 at s=1, finite slope at s=0)
             float normMagOverS;
@@ -150,7 +178,12 @@ namespace VehiclePhysics.Core
                 fy *= invE;
             }
 
-            // Implicit wheel-spin tire damping derivative for Step 3/4 spin stability
+            // Pneumatic trail & steering self-aligning torque (SAT) telemetry
+            float halfPatch = 0.5f * math.max(manifold.ContactPatchLengthM, 0.08f);
+            carcass.PneumaticTrailM = halfPatch * 0.33f * math.saturate(1.0f - s / 1.5f);
+            carcass.SelfAligningTorqueNm = -fy * (carcass.PneumaticTrailM + wCfg.MechanicalTrailM);
+
+            // Implicit wheel-spin tire damping derivative for spin stability
             float kTreadX = 2.0f * maxFx / (sigX * peakKappa);
             float dFx_dOmega = rEff * (kTreadX * dtSub / (1.0f + dx) + cLow);
 
