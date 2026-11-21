@@ -215,6 +215,7 @@ namespace VehiclePhysics.Runtime
                     NominalPressureKPa = 220f,
                     InitialTreadDepthMm = 8.0f,
                     CompoundType = TireCompoundType.Street,
+                    TireWidthM = 0.235f,
                     AxleIndex = axle,
                     SideIndex = side,
                     DefaultControlFlags = flags
@@ -438,6 +439,8 @@ namespace VehiclePhysics.Runtime
                 _pendingSimHandle.Complete();
                 _pendingSimHandle = default;
             }
+            _rayPipeline.DrainPendingObjectImpulses(_world);
+
             _sw.Stop();
 
             _lastSimMs = _sw.Elapsed.TotalMilliseconds;
@@ -499,6 +502,13 @@ namespace VehiclePhysics.Runtime
             followCamera.transform.position = Vector3.Lerp(
                 followCamera.transform.position, desiredPos, 1f - Mathf.Exp(-8f * Time.deltaTime));
             followCamera.transform.LookAt(target.position + Vector3.up * 0.8f);
+        }
+
+        public bool TryGetWorldForDebug(out VehicleSimulationWorld world)
+        {
+            _pendingSimHandle.Complete(); // Safe no-op once FixedUpdate job has finished
+            world = _world;
+            return _world != null && !_world.IsDisposed;
         }
 
         private void OnGUI()

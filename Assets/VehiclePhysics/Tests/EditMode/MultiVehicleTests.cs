@@ -91,7 +91,7 @@ namespace VehiclePhysics.Tests
                     AutoTransmission = 1
                 };
 
-                WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer, bool driven) => new WheelConfig
+                WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer, bool driven) => new()
                 {
                     MountPositionLocal = new float3(x, 0f, z),
                     StrutAxisLocal = new float3(0f, -1f, 0f),
@@ -140,7 +140,7 @@ namespace VehiclePhysics.Tests
                 {
                     bool isPlayer = i == 0;
                     float a = i / (float)fleetSize * math.PI * 2f;
-                    float3 pos = new float3(80f * math.cos(a), 0.65f, 50f * math.sin(a));
+                    float3 pos = new(80f * math.cos(a), 0.65f, 50f * math.sin(a));
                     float3 fwd = math.normalizesafe(new float3(-80f * math.sin(a), 0f, 50f * math.cos(a)));
                     world.SpawnVehicle((uint)(i + 1), 0, pos, quaternion.LookRotationSafe(fwd, math.up()), isPlayer, (ushort)(isPlayer ? 9 : 2));
                     wpIndices[i] = ((int)math.floor(a / (math.PI * 2f) * wpCount) + 1) % wpCount;

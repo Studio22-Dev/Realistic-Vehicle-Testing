@@ -47,7 +47,7 @@ namespace VehiclePhysics.Tests
                 HasPowertrain = 1
             };
 
-            WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer) => new WheelConfig
+            WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer) => new()
             {
                 MountPositionLocal = new float3(x, 0.0f, z),
                 StrutAxisLocal = new float3(0f, -1f, 0f),
@@ -164,7 +164,7 @@ namespace VehiclePhysics.Tests
                 Physics.SyncTransforms();
 
                 quaternion carRot = quaternion.RotateX(math.radians(20f));
-                float3 startPos = new float3(0f, 0.65f, 0f);
+                float3 startPos = new(0f, 0.65f, 0f);
 
                 CreateStandardCarWorld(out var world, out var pipeline, startPos, carRot, substeps);
                 using (world)

@@ -31,10 +31,10 @@ namespace VehiclePhysics.Tests
 
             var wheels = new WheelConfig[]
             {
-                new WheelConfig { MountPositionLocal = new float3(-0.8f, 0f,  1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 0, SideIndex = 0 },
-                new WheelConfig { MountPositionLocal = new float3( 0.8f, 0f,  1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 0, SideIndex = 1 },
-                new WheelConfig { MountPositionLocal = new float3(-0.8f, 0f, -1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 1, SideIndex = 0 },
-                new WheelConfig { MountPositionLocal = new float3( 0.8f, 0f, -1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 1, SideIndex = 1 },
+                new() { MountPositionLocal = new float3(-0.8f, 0f,  1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 0, SideIndex = 0 },
+                new() { MountPositionLocal = new float3( 0.8f, 0f,  1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 0, SideIndex = 1 },
+                new() { MountPositionLocal = new float3(-0.8f, 0f, -1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 1, SideIndex = 0 },
+                new() { MountPositionLocal = new float3( 0.8f, 0f, -1.3f), StrutAxisLocal = new float3(0, -1, 0), RestLengthM = 0.4f, UnloadedRadiusM = 0.33f, AxleIndex = 1, SideIndex = 1 },
             };
 
             world.RegisterArchetype(
@@ -83,7 +83,7 @@ namespace VehiclePhysics.Tests
                     Assert.AreEqual(1f, manifold.BlendedNormal.y, 1e-3f);
                     Assert.AreEqual(0.65f, mat.StaticFriction, 1e-4f);
                     Assert.AreEqual(1, mat.MaterialTypeId);
-                    Assert.AreEqual(1, world.WheelInputs[start + w].ContactSampleCount);
+                    Assert.That(world.WheelInputs[start + w].ContactSampleCount, Is.InRange(1, world.MaxSamplesPerWheel));
                 }
             }
             finally

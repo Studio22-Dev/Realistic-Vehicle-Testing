@@ -140,8 +140,7 @@ namespace VehiclePhysics.Core
                 }
 
                 float denom = math.max(cosAngle, 0.25f);
-                float distToPlane = math.dot(worldMount - manifold.BlendedPoint, n) / denom;
-                float reqStrutLength = distToPlane - wCfg.UnloadedRadiusM;
+                float reqStrutLength = (math.dot(worldMount - manifold.BlendedPoint, n) - wCfg.UnloadedRadiusM) / denom;
                 float rawCompression = wCfg.RestLengthM - reqStrutLength;
 
                 if (rawCompression <= 0f)

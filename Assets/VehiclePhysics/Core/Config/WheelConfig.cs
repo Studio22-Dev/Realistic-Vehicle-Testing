@@ -47,7 +47,7 @@ namespace VehiclePhysics.Core
         public float  InitialTreadDepthMm;         // 124..127
 
         public float  UnsprungMassKg;              // 128..131
-        private float _reserved0;                  // 132..135
+        public float  TireWidthM;                  // 132..135 (0 -> defaults to 0.235m)
         public byte   AxleIndex;                   // 136
         public byte   SideIndex;                   // 137
         public byte   DefaultControlFlags;         // 138 WheelControlFlagBits

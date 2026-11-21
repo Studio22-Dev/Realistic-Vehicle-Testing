@@ -129,6 +129,7 @@ GameObject:
   m_Component:
   - component: {fileID: 52433582}
   - component: {fileID: 52433581}
+  - component: {fileID: 52433583}
   m_Layer: 0
   m_Name: Vehicle Simulation Manager
   m_TagString: Untagged
@@ -148,7 +149,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 51fb4d717fcb6491da6f6618e9cc30e0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: VehiclePhysics.Runtime::VehiclePhysics.Runtime.VehicleSimulationManager
-  totalVehicles: 24
+  totalVehicles: 1
   playerSubsteps: 5
   nearAiSubsteps: 3
   farAiSubsteps: 2
@@ -179,6 +180,33 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &52433583
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 52433580}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4601d68179ddb425799323469175793a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: VehiclePhysics.Runtime::VehiclePhysics.Runtime.VehicleManifoldGizmos
+  simulationManager: {fileID: 52433581}
+  targetVehicleIndex: 0
+  maxVehiclesToDraw: 4
+  drawSuspensionAndRim: 1
+  drawCapsuleSweeps: 1
+  drawSidewallSpheres: 1
+  drawOnlyHitSweeps: 0
+  drawClusterNormals: 1
+  drawBlendedSummary: 1
+  drawRawXpbdPlanes: 1
+  drawDynamicImpulseVectors: 1
+  drawSceneLabels: 1
+  drawScreenHud: 1
+  normalDisplayScale: 0.35
+  lookaheadMarginM: 0.02
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0

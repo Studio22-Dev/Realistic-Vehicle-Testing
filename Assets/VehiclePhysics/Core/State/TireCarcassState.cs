@@ -63,7 +63,7 @@ namespace VehiclePhysics.Core
         public float  RimPeakImpactImpulseNs;     // 120..123( 4B) Peak rim strike impulse (N*s)
         public byte   Flags;                      // 124     ( 1B) TireCarcassFlags
         public byte   RimType;                    // 125     ( 1B) TireRimType
-        private byte  _pad0;                      // 126     ( 1B)
+        public byte   ActiveRawProbeCount;        // 126     ( 1B) Raw volumetric contacts in ContactSamples
         private byte  _pad1;                      // 127     ( 1B) -> 128B total
     }
 }

@@ -7,7 +7,7 @@ using VehiclePhysics.Core;
 
 namespace VehiclePhysics.Bridge
 {
-    [BurstCompile]
+    [BurstCompile(FloatMode = FloatMode.Default)]
     public struct PrepareWheelRaycastsJob : IJobParallelFor
     {
         [ReadOnly] public NativeArray<int> ActiveWheelSlots;
@@ -17,203 +17,191 @@ namespace VehiclePhysics.Bridge
         [ReadOnly] public NativeArray<VehicleState> Vehicles;
         [ReadOnly] public NativeArray<VehicleConfig> VehicleConfigs;
         [ReadOnly] public NativeArray<WheelConfig> WheelConfigs;
+        [ReadOnly] public NativeArray<WheelState> Wheels;
 
         public PhysicsScene PhysicsScene;
         public QueryParameters QueryParams;
         public float LookaheadMarginM;
 
-        [WriteOnly] public NativeArray<RaycastCommand> Commands;
+        [NativeDisableParallelForRestriction] public NativeArray<CapsulecastCommand> CapsuleCommands;
+        [NativeDisableParallelForRestriction] public NativeArray<SpherecastCommand> SphereCommands;
+        public NativeArray<WheelRayMeta> WheelMeta;
 
-        public void Execute(int cmdIdx)
+        public void Execute(int idx)
         {
-            int vehIdx = ActiveWheelVehicleIndices[cmdIdx];
-            VehicleState veh = Vehicles[vehIdx];
+            int slot = ActiveWheelSlots[idx];
+            int vehIdx = ActiveWheelVehicleIndices[idx];
+            int cfgIdx = ActiveWheelConfigIndices[idx];
 
+            VehicleState veh = Vehicles[vehIdx];
+            VehicleConfig vCfg = VehicleConfigs[veh.ConfigIndex];
+            WheelConfig wCfg = WheelConfigs[cfgIdx];
+            WheelState ws = Wheels[slot];
+
+            int capBase = idx * VehicleRaycastPipeline.MaxCapsulesPerWheel;
+            int sphBase = idx * VehicleRaycastPipeline.MaxSpheresPerWheel;
+
+            // Sleeping / LOD3 vehicles skip all PhysX casts
             if (veh.LodTier >= 3 || (veh.TierFlags & VehicleTierFlags.IsSleeping) != 0)
             {
-                QueryParameters skipParams = QueryParams;
-                skipParams.layerMask = 0;
-                Commands[cmdIdx] = new RaycastCommand(PhysicsScene, Vector3.zero, Vector3.down, skipParams, 0.01f);
+                for (int i = 0; i < VehicleRaycastPipeline.MaxCapsulesPerWheel; i++)
+                    CapsuleCommands[capBase + i] = default;
+                for (int i = 0; i < VehicleRaycastPipeline.MaxSpheresPerWheel; i++)
+                    SphereCommands[sphBase + i] = default;
+
+                WheelMeta[idx] = default;
                 return;
             }
-
-            VehicleConfig vCfg = VehicleConfigs[veh.ConfigIndex];
-            WheelConfig wCfg = WheelConfigs[ActiveWheelConfigIndices[cmdIdx]];
 
             float3 mountRelCoM = wCfg.MountPositionLocal - vCfg.CenterOfMassLocalOffset;
             float3 worldMount = veh.Position + math.rotate(veh.Rotation, mountRelCoM);
-            float3 worldStrutDir = math.normalizesafe(
+            float3 downDir = math.normalizesafe(
                 math.rotate(veh.Rotation, wCfg.StrutAxisLocal),
                 new float3(0f, -1f, 0f));
+            float3 upDir = -downDir;
 
-            float rayLength = wCfg.RestLengthM + wCfg.UnloadedRadiusM + LookaheadMarginM;
-            Commands[cmdIdx] = new RaycastCommand(PhysicsScene, worldMount, worldStrutDir, QueryParams, rayLength);
+            // Align probes to live wheel steering angle (matches TireSolver sign: +steer -> Right/+X)
+            math.sincos(ws.SteerAngleRad, out float sinSteer, out float cosSteer);
+            float3 steerFwdHint = math.rotate(veh.Rotation, new float3(sinSteer, 0f, cosSteer));
+            float3 steerRightHint = math.rotate(veh.Rotation, new float3(cosSteer, 0f, -sinSteer));
+
+            float3 rightDir = math.normalizesafe(math.cross(upDir, steerFwdHint), steerRightHint);
+            float3 fwdDir = math.normalizesafe(math.cross(rightDir, upDir), steerFwdHint);
+            float outSign = wCfg.SideIndex == 0 ? -1f : 1f;
+            float3 outDir = rightDir * outSign;
+
+            float R = math.max(wCfg.UnloadedRadiusM, 0.10f);
+            float halfW = (wCfg.TireWidthM > 0f ? wCfg.TireWidthM : 0.235f) * 0.5f;
+
+            byte lod = veh.LodTier;
+            float targetCapR = lod == 0 ? 0.065f : (lod == 1 ? 0.085f : 0.110f);
+            float rCap = math.min(targetCapR, math.min(R * 0.42f, halfW * 0.90f));
+            float capHalfSpan = math.max(0.005f, halfW - rCap);
+
+            float centerRayDist = wCfg.RestLengthM + R + LookaheadMarginM;
+            float hubDropCurrent = math.max(0f, wCfg.RestLengthM - ws.SuspensionCompression);
+            float3 hubEst = worldMount + downDir * hubDropCurrent;
+
+            // --- Capsule 0 (All LODs): Center vertical sweep from strut mount ---
+            // Offset start upward by rCap so outer bottom skin starts at worldMount (no initial overlap).
+            float3 c0Origin = worldMount - downDir * rCap;
+            CapsuleCommands[capBase + 0] = new CapsulecastCommand(
+                PhysicsScene,
+                c0Origin - outDir * capHalfSpan,
+                c0Origin + outDir * capHalfSpan,
+                rCap,
+                downDir,
+                QueryParams,
+                centerRayDist);
+
+            // --- Arc Capsules (C1 Leading / C2 Trailing) ---
+            float arcBackoff = math.max(rCap + 0.06f, 0.45f * R);
+            float arcSweepDist = arcBackoff + (R - rCap) + LookaheadMarginM;
+
+            byte capCount;
+            if (lod == 0)
+            {
+                capCount = 9;
+                WriteArcCapsule(capBase + 1, hubEst, fwdDir, downDir, outDir,  18f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 2, hubEst, fwdDir, downDir, outDir,  36f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 3, hubEst, fwdDir, downDir, outDir,  54f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 4, hubEst, fwdDir, downDir, outDir,  72f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 5, hubEst, fwdDir, downDir, outDir, -18f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 6, hubEst, fwdDir, downDir, outDir, -36f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 7, hubEst, fwdDir, downDir, outDir, -54f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 8, hubEst, fwdDir, downDir, outDir, -72f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+            }
+            else if (lod == 1)
+            {
+                capCount = 5;
+                WriteArcCapsule(capBase + 1, hubEst, fwdDir, downDir, outDir,  24f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 2, hubEst, fwdDir, downDir, outDir,  48f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 3, hubEst, fwdDir, downDir, outDir, -24f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 4, hubEst, fwdDir, downDir, outDir, -48f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                for (int i = 5; i < VehicleRaycastPipeline.MaxCapsulesPerWheel; i++)
+                    CapsuleCommands[capBase + i] = default;
+            }
+            else
+            {
+                capCount = 3;
+                WriteArcCapsule(capBase + 1, hubEst, fwdDir, downDir, outDir,  36f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                WriteArcCapsule(capBase + 2, hubEst, fwdDir, downDir, outDir, -36f, rCap, capHalfSpan, arcBackoff, arcSweepDist);
+                for (int i = 3; i < VehicleRaycastPipeline.MaxCapsulesPerWheel; i++)
+                    CapsuleCommands[capBase + i] = default;
+            }
+
+            // --- Sidewall / Shoulder Spheres (C3) ---
+            float rSide = math.min(R * 0.28f, halfW * 0.85f);
+            float sideBackoff = rSide + 0.05f;
+            float sideSweep = sideBackoff + (halfW - rSide) + LookaheadMarginM;
+            byte sphCount = 0;
+
+            if (lod <= 1)
+            {
+                float3 sideOutDir = math.normalizesafe(0.95f * outDir + 0.31f * downDir, outDir);
+                SphereCommands[sphBase + 0] = new SpherecastCommand(
+                    PhysicsScene, hubEst - sideOutDir * sideBackoff, rSide, sideOutDir, QueryParams, sideSweep);
+                sphCount = 1;
+            }
+            else
+            {
+                SphereCommands[sphBase + 0] = default;
+            }
+
+            if (lod == 0)
+            {
+                float3 sideInDir = math.normalizesafe(-0.95f * outDir + 0.31f * downDir, -outDir);
+                SphereCommands[sphBase + 1] = new SpherecastCommand(
+                    PhysicsScene, hubEst - sideInDir * sideBackoff, rSide, sideInDir, QueryParams, sideSweep);
+                sphCount = 2;
+            }
+            else
+            {
+                SphereCommands[sphBase + 1] = default;
+            }
+
+            WheelMeta[idx] = new WheelRayMeta
+            {
+                HubEstimate = hubEst,
+                CapsuleRadiusM = rCap,
+                WheelUp = upDir,
+                ArcBackoffM = arcBackoff,
+                WheelOutward = outDir,
+                SideRadiusM = rSide,
+                WheelForward = fwdDir,
+                SideBackoffM = sideBackoff,
+                HubDropCurrentM = hubDropCurrent,
+                HalfWidthM = halfW,
+                CenterRayDistM = centerRayDist,
+                CapsuleCount = capCount,
+                SphereCount = sphCount,
+                LodTier = lod
+            };
         }
-    }
 
-    [BurstCompile]
-    public struct ProcessWheelHitsJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<int> ActiveWheelSlots;
-        [ReadOnly] public NativeArray<int> ActiveWheelVehicleIndices;
-        [ReadOnly] public NativeArray<int> ActiveWheelConfigIndices;
-
-        [ReadOnly] public NativeArray<VehicleState> Vehicles;
-        [ReadOnly] public NativeArray<WheelConfig> WheelConfigs;
-        [ReadOnly] public NativeArray<SurfaceMaterialData> SurfaceMaterials;
-        [ReadOnly] public NativeArray<RaycastHit> Hits;
-
-        [ReadOnly] public NativeHashMap<ColliderIdKey, ColliderPhysicsMeta>.ReadOnly ColliderMetaMap;
-        [ReadOnly] public NativeArray<DynamicBodyMotion> DynamicBodies;
-
-        public int MaxHitsPerRay;
-        public float DefaultPatchLengthM;
-
-        // Disjointness guaranteed by unique ActiveWheelSlots mapping
-        [NativeDisableParallelForRestriction] public NativeArray<WheelContactSample> ContactSamples;
-        [NativeDisableParallelForRestriction] public NativeArray<ContactManifold> ContactManifolds;
-        [NativeDisableParallelForRestriction] public NativeArray<WheelInput> WheelInputs;
-
-        public void Execute(int cmdIdx)
+        private void WriteArcCapsule(
+            int cmdIdx,
+            float3 hubEst,
+            float3 fwdDir,
+            float3 downDir,
+            float3 outDir,
+            float thetaDeg,
+            float rCap,
+            float halfSpan,
+            float backoff,
+            float sweepDist)
         {
-            int wheelSlot = ActiveWheelSlots[cmdIdx];
-            int vehIdx = ActiveWheelVehicleIndices[cmdIdx];
-            VehicleState veh = Vehicles[vehIdx];
-            WheelConfig wCfg = WheelConfigs[ActiveWheelConfigIndices[cmdIdx]];
-            WheelInput wInput = WheelInputs[wheelSlot];
-            int sampleSlot = wInput.ContactSampleStartIndex;
-
-            if (veh.LodTier >= 3 || (veh.TierFlags & VehicleTierFlags.IsSleeping) != 0)
-            {
-                ContactSamples[sampleSlot] = default;
-                ContactManifolds[wheelSlot] = default;
-                wInput.ContactSampleCount = 0;
-                WheelInputs[wheelSlot] = wInput;
-                return;
-            }
-
-            int baseHitIdx = cmdIdx * MaxHitsPerRay;
-            bool hasValidHit = false;
-            float bestDist = float.MaxValue;
-            RaycastHit bestHit = default;
-            ColliderIdKey bestKey = default;
-            ColliderPhysicsMeta bestMeta = new ColliderPhysicsMeta { DynamicBodyIndex = -1 };
-
-            for (int h = 0; h < MaxHitsPerRay; h++)
-            {
-                RaycastHit hit = Hits[baseHitIdx + h];
-                ColliderIdKey key = ColliderIdKey.FromHit(in hit);
-
-                // First invalid hit marks the end of RaycastCommand results for this ray.
-                if (!key.IsValid)
-                    break;
-
-                ColliderPhysicsMeta meta;
-                if (ColliderMetaMap.TryGetValue(key, out meta))
-                {
-                    if ((meta.Flags & ColliderMetaFlags.IgnoreWheelRays) != 0)
-                        continue;
-
-                    if (meta.OwnerVehicleId != 0 && meta.OwnerVehicleId == veh.VehicleId)
-                        continue;
-                }
-                else
-                {
-                    meta = new ColliderPhysicsMeta { DynamicBodyIndex = -1, SurfaceMaterialIndex = 0 };
-                }
-
-                if (hit.distance < bestDist)
-                {
-                    bestDist = hit.distance;
-                    bestHit = hit;
-                    bestKey = key;
-                    bestMeta = meta;
-                    hasValidHit = true;
-                }
-            }
-
-            if (!hasValidHit)
-            {
-                ContactSamples[sampleSlot] = default;
-                ContactManifolds[wheelSlot] = default;
-                wInput.ContactSampleCount = 0;
-                WheelInputs[wheelSlot] = wInput;
-                return;
-            }
-
-            int matIdx = math.clamp(bestMeta.SurfaceMaterialIndex, 0, SurfaceMaterials.Length - 1);
-            SurfaceMaterialData mat = SurfaceMaterials[matIdx];
-
-            float3 surfVel = float3.zero;
-            if (bestMeta.DynamicBodyIndex >= 0 && bestMeta.DynamicBodyIndex < DynamicBodies.Length)
-            {
-                surfVel = DynamicBodies[bestMeta.DynamicBodyIndex].GetPointVelocity(bestHit.point);
-            }
-
-            float3 normal = math.normalizesafe((float3)bestHit.normal, new float3(0f, 1f, 0f));
-            float maxReach = wCfg.RestLengthM + wCfg.UnloadedRadiusM;
-            float pen = math.max(0f, maxReach - bestHit.distance);
-
-            float effStaticMu = mat.StaticFriction * mat.TireGripMultiplier;
-            float effDynamicMu = mat.DynamicFriction * mat.TireGripMultiplier;
-
-            var sample = new WheelContactSample
-            {
-                Point = bestHit.point,
-                PenetrationDepth = pen,
-                Normal = normal,
-                StaticFriction = effStaticMu,
-                SurfaceVelocity = surfVel,
-                DynamicFriction = effDynamicMu,
-                RollingResistance = mat.RollingResistance,
-                SampleWeight = 1.0f,
-                SurfaceRoughness = mat.SurfaceRoughness,
-                IsValid = 1,
-                SurfaceMaterialType = mat.MaterialTypeId
-            };
-            ContactSamples[sampleSlot] = sample;
-
-            bool isDynamic = bestMeta.DynamicBodyIndex >= 0;
-
-            var c0 = new ManifoldContactPoint
-            {
-                WorldPoint = sample.Point,
-                PenetrationM = pen,
-                WorldNormal = sample.Normal,
-                ContactForceN = 0f,
-                SurfaceVelocity = sample.SurfaceVelocity,
-                ColliderInstanceID = bestKey.GetHashCode(),
-                PendingObjectImpulse = float3.zero,
-                DynamicBodyIndex = bestMeta.DynamicBodyIndex,
-                ContactWeight = 1.0f,
-                LocalFluidOrLooseDepthM = 0f,
-                FrictionScale = 1.0f,
-                SurfaceMaterialIndex = (byte)matIdx,
-                IsValid = 1,
-                SampleCount = 1,
-                ClusterFlags = isDynamic ? ManifoldClusterFlags.HitDynamicBody : ManifoldClusterFlags.None
-            };
-
-            ContactManifolds[wheelSlot] = new ContactManifold
-            {
-                ClusterBottom = c0,
-                BlendedPoint = sample.Point,
-                ContactPatchLengthM = DefaultPatchLengthM,
-                BlendedNormal = sample.Normal,
-                WaterDepthM = 0f,
-                BlendedVelocity = sample.SurfaceVelocity,
-                TerrainSinkageM = 0f,
-                HydroplaningFactor = 0f,
-                BulldozingDragN = 0f,
-                BlendedFrictionScale = 1.0f,
-                ActiveClusterMask = 1 << 0,
-                PrimaryMaterialIndex = (byte)matIdx,
-                IsGrounded = 1,
-                Flags = isDynamic ? ManifoldFlags.TouchesDynamicBody : ManifoldFlags.None
-            };
-
-            wInput.ContactSampleCount = 1;
-            WheelInputs[wheelSlot] = wInput;
+            math.sincos(math.radians(thetaDeg), out float s, out float c);
+            float3 dir = math.normalizesafe(fwdDir * s + downDir * c, downDir);
+            float3 origin = hubEst - dir * backoff;
+            CapsuleCommands[cmdIdx] = new CapsulecastCommand(
+                PhysicsScene,
+                origin - outDir * halfSpan,
+                origin + outDir * halfSpan,
+                rCap,
+                dir,
+                QueryParams,
+                sweepDist);
         }
     }
 }

@@ -84,7 +84,7 @@ namespace VehiclePhysics.Tests
                 AutoTransmission = 1
             };
 
-            WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer) => new WheelConfig
+            WheelConfig MakeWheel(float x, float z, byte axle, byte side, bool steer) => new()
             {
                 MountPositionLocal = new float3(x, 0f, z),
                 StrutAxisLocal = new float3(0f, -1f, 0f),

@@ -11,6 +11,7 @@ namespace VehiclePhysics.Core
         // 4 * 128B (TireCarcassState / TireThermalAndWearState) = 512B = 8 x 64B cache lines.
         // Rounding each vehicle's wheel allocation up to a multiple of 4 prevents false sharing.
         public const int WheelCacheAlignmentStride = 4;
+        public const int DefaultMaxSamplesPerWheel = 11; // 9 arc capsules + 2 sidewall spheres
 
         public readonly int MaxVehicles;
         public readonly int MaxTotalWheelSlots;
@@ -48,7 +49,7 @@ namespace VehiclePhysics.Core
             int maxVehicles,
             int maxArchetypes,
             int maxSurfaceMaterials,
-            int maxSamplesPerWheel = 1)
+            int maxSamplesPerWheel = DefaultMaxSamplesPerWheel)
             : this(
                 maxVehicles,
                 maxVehicles * WheelCacheAlignmentStride,
@@ -65,7 +66,7 @@ namespace VehiclePhysics.Core
             int maxArchetypes,
             int maxArchetypeWheelConfigs,
             int maxSurfaceMaterials,
-            int maxSamplesPerWheel = 1)
+            int maxSamplesPerWheel = DefaultMaxSamplesPerWheel)
         {
             MaxVehicles = math.max(1, maxVehicles);
             MaxTotalWheelSlots = AlignWheelCount(math.max(WheelCacheAlignmentStride, maxTotalWheelSlots));
@@ -261,6 +262,11 @@ namespace VehiclePhysics.Core
                 WheelInput wIn = WheelInputs[slot];
                 wIn.ContactSampleCount = 0;
                 WheelInputs[slot] = wIn;
+
+                TireCarcassState carcass = TireCarcassStates[slot];
+                carcass.ActiveRawProbeCount = 0;
+                carcass.RimGroundLoadN = 0f;
+                TireCarcassStates[slot] = carcass;
             }
             else
             {

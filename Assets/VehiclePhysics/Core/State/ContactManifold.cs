@@ -3,24 +3,38 @@ using Unity.Mathematics;
 
 namespace VehiclePhysics.Core
 {
+    /// <summary>
+    /// Raw volumetric contact plane from Capsulecast/Spherecast (Step 2 -> Step 3 XPBD ring).
+    /// Exact size: 64 bytes
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct WheelContactSample
     {
-        public float3 Point;
-        public float PenetrationDepth;
+        public float3 Point;               // 0..11 (12B)
+        public float  PenetrationDepth;    // 12..15 (4B) -> 16B
 
-        public float3 Normal;
-        public float StaticFriction;
+        public float3 Normal;              // 16..27 (12B)
+        public float  StaticFriction;      // 28..31 (4B) -> 32B
 
-        public float3 SurfaceVelocity;
-        public float DynamicFriction;
+        public float3 SurfaceVelocity;     // 32..43 (12B)
+        public float  DynamicFriction;     // 44..47 (4B) -> 48B
 
-        public float RollingResistance;
-        public float SampleWeight;
-        public float SurfaceRoughness;
-        public byte IsValid;
-        public byte SurfaceMaterialType;
-        private ushort _pad0;
+        public float  RollingResistance;   // 48..51 (4B)
+        public float  SampleWeight;        // 52..55 (4B)
+        public float  ProbeAngleRad;       // 56..59 (4B)
+
+        public byte   IsValid;             // 60 (1B)
+        public byte   SurfaceMaterialType; // 61 (1B)
+        public byte   ZoneId;              // 62 (1B) WheelProbeZones
+        private byte  _pad0;               // 63 (1B) -> 64B total
+    }
+
+    public static class WheelProbeZones
+    {
+        public const byte Bottom   = 0;
+        public const byte Leading  = 1;
+        public const byte Trailing = 2;
+        public const byte Sidewall = 3;
     }
 
     public static class ManifoldClusterFlags
@@ -39,6 +53,7 @@ namespace VehiclePhysics.Core
         public const byte InStandingWater    = 1 << 1;
         public const byte OnDeformableSoil   = 1 << 2;
         public const byte TouchesDynamicBody = 1 << 3;
+        public const byte HasWallImpact      = 1 << 4; // Non-climbable horizontal impact in C1/C2
     }
 
     /// <summary>
